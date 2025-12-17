@@ -1036,10 +1036,14 @@ const App = () => {
 
   const handleCanvasMouseMove = (e: React.MouseEvent) => {
     if (!isDraggingCanvas || !dragStartRef.current) return;
+
+    // Capture values synchronously to avoid ref.current becoming null if update is deferred
+    const dragStart = dragStartRef.current;
+
     setTransform(prev => ({
       ...prev,
-      x: e.clientX - dragStartRef.current!.x,
-      y: e.clientY - dragStartRef.current!.y
+      x: e.clientX - dragStart.x,
+      y: e.clientY - dragStart.y
     }));
   };
 
@@ -1064,10 +1068,14 @@ const App = () => {
     // 阻止默认滚动行为，提升拖拽体验
     // 注意：这可能需要设置 touch-action: none 在 CSS 中
 
+    // Capture values synchronously
+    const dragStart = dragStartRef.current;
+    const touch = e.touches[0];
+
     setTransform(prev => ({
       ...prev,
-      x: e.touches[0].clientX - dragStartRef.current!.x,
-      y: e.touches[0].clientY - dragStartRef.current!.y
+      x: touch.clientX - dragStart.x,
+      y: touch.clientY - dragStart.y
     }));
   };
 
