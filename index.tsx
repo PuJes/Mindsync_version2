@@ -508,7 +508,7 @@ const EditModal = ({
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[150] animate-in fade-in duration-200" onClick={onClose}>
       <div
-        className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 transform scale-100 animate-in zoom-in-95 duration-200"
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-sm mx-4 p-6 transform scale-100 animate-in zoom-in-95 duration-200"
         onClick={e => e.stopPropagation()}
       >
         <h3 className="text-lg font-bold text-slate-800 mb-4">{title}</h3>
@@ -566,8 +566,8 @@ const SettingsModal = ({
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[100]">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in duration-200">
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[100] px-4">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in duration-200 max-h-[90vh] overflow-y-auto">
         <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
           <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
             <Settings size={20} className="text-slate-500" /> 设置与数据
@@ -1048,6 +1048,34 @@ const App = () => {
     dragStartRef.current = null;
   };
 
+  // --- 触摸事件处理 (Mobile Support) ---
+  const handleCanvasTouchStart = (e: React.TouchEvent) => {
+    // 只有点击背景（或非交互元素）时才允许拖拽
+    if ((e.target as HTMLElement).closest('.cursor-pointer') || (e.target as HTMLElement).closest('button')) return;
+
+    if (e.touches.length === 1) {
+      setIsDraggingCanvas(true);
+      dragStartRef.current = { x: e.touches[0].clientX - transform.x, y: e.touches[0].clientY - transform.y };
+    }
+  };
+
+  const handleCanvasTouchMove = (e: React.TouchEvent) => {
+    if (!isDraggingCanvas || !dragStartRef.current || e.touches.length !== 1) return;
+    // 阻止默认滚动行为，提升拖拽体验
+    // 注意：这可能需要设置 touch-action: none 在 CSS 中
+
+    setTransform(prev => ({
+      ...prev,
+      x: e.touches[0].clientX - dragStartRef.current!.x,
+      y: e.touches[0].clientY - dragStartRef.current!.y
+    }));
+  };
+
+  const handleCanvasTouchEnd = () => {
+    setIsDraggingCanvas(false);
+    dragStartRef.current = null;
+  };
+
   const handleCanvasWheel = (e: React.WheelEvent) => {
     if (e.ctrlKey || e.metaKey) {
       // Zoom
@@ -1079,6 +1107,10 @@ const App = () => {
         onMouseUp={handleCanvasMouseUp}
         onMouseLeave={handleCanvasMouseUp}
         onWheel={handleCanvasWheel}
+        onTouchStart={handleCanvasTouchStart}
+        onTouchMove={handleCanvasTouchMove}
+        onTouchEnd={handleCanvasTouchEnd}
+        style={{ touchAction: 'none' }} // 禁用浏览器默认触摸操作
       >
         {/* 背景点阵 */}
         <div className="absolute inset-0 opacity-10 pointer-events-none"
@@ -1118,7 +1150,7 @@ const App = () => {
                     title="点击批量修改此分类名称"
                   >
                     <span>{cat}</span>
-                    <Edit2 size={12} className="opacity-0 group-hover/cat:opacity-100 text-slate-400 cursor-pointer hover:text-blue-500" />
+                    <Edit2 size={12} className="opacity-100 md:opacity-0 group-hover/cat:opacity-100 text-slate-400 cursor-pointer hover:text-blue-500 transition-opacity" />
                   </div>
                 }
                 childrenNodes={filteredItems.filter(i => i.category === cat).map(file => (
@@ -1145,7 +1177,7 @@ const App = () => {
                         {/* 脑图模式下的删除按钮 (Hover 显示) */}
                         <button
                           onClick={(e) => handleDeleteItem(file.id, e)}
-                          className="absolute -right-8 top-1/2 -translate-y-1/2 p-1.5 bg-white border border-slate-200 text-slate-400 hover:text-red-500 hover:border-red-200 rounded-full shadow-sm opacity-0 group-hover/node:opacity-100 transition-all scale-90 hover:scale-100 z-50"
+                          className="absolute -right-8 top-1/2 -translate-y-1/2 p-1.5 bg-white border border-slate-200 text-slate-400 hover:text-red-500 hover:border-red-200 rounded-full shadow-sm opacity-100 md:opacity-0 group-hover/node:opacity-100 transition-all scale-90 hover:scale-100 z-50"
                           title="删除此节点"
                         >
                           <Trash2 size={12} />
@@ -1364,7 +1396,7 @@ const App = () => {
                     title="点击修改分类"
                   >
                     <span className="truncate max-w-[80px]">{item.category}</span>
-                    <Edit2 size={10} className="opacity-0 group-hover/cat:opacity-100" />
+                    <Edit2 size={10} className="opacity-100 md:opacity-0 group-hover/cat:opacity-100" />
                   </button>
                 </div>
 
@@ -1414,76 +1446,80 @@ const App = () => {
 
         {/* 3. 列表视图 (List) - 原有视图 */}
         {!isAnalyzing && viewMode === 'list' && items.length > 0 && (
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-            <div className="grid grid-cols-12 gap-4 px-6 py-3 bg-slate-50 border-b border-slate-200 text-xs font-bold text-slate-400 uppercase tracking-wider">
-              <div className="col-span-5">文件名称</div>
-              <div className="col-span-2">知识分类</div>
-              <div className="col-span-3">应用场景</div>
-              <div className="col-span-2">核心标签</div>
-            </div>
-            <div className="divide-y divide-slate-100">
-              {filteredItems.map(item => (
-                <div key={item.id} className="grid grid-cols-12 gap-4 px-6 py-4 items-center hover:bg-slate-50 transition-colors group relative">
-                  <div
-                    className="col-span-5 pr-2 flex items-center gap-3 cursor-pointer"
-                    onClick={() => handleDownload(item)}
-                    title="点击下载源文件"
-                  >
-                    <div className="p-2 bg-slate-100 rounded-lg text-slate-500 group-hover:bg-blue-50 group-hover:text-blue-500 transition-colors">
-                      {getFileIcon(item.fileType, "w-4 h-4")}
-                    </div>
-                    <div className="overflow-hidden">
-                      <div className="font-semibold text-slate-800 truncate group-hover:text-blue-600 transition-colors">{item.fileName}</div>
-                      <div className="text-xs text-slate-500 truncate mt-0.5">{item.summary}</div>
-                    </div>
-                  </div>
-                  <div className="col-span-2 group/cat flex items-center relative z-10">
-                    <button
-                      type="button"
-                      onClick={(e) => handleEditCategory(item.id, item.category, e)}
-                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-slate-100 text-slate-600 border border-slate-200 hover:bg-blue-100 hover:text-blue-600 hover:border-blue-200 transition-all cursor-pointer"
-                      title="点击修改分类"
-                    >
-                      <span className="truncate max-w-[100px]">{item.category}</span>
-                      <Edit2 size={12} className="shrink-0 opacity-0 group-hover/cat:opacity-100 text-slate-400 group-hover/cat:text-blue-500 transition-opacity" />
-                    </button>
-                  </div>
-                  <div className="col-span-3 text-xs text-slate-600 font-medium flex items-center gap-1.5">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
-                    {item.applicability}
-                  </div>
-                  <div className="col-span-2 flex flex-wrap gap-1 items-center justify-between relative z-10">
-                    <div className="flex gap-1 flex-wrap items-center">
-                      {item.tags.map(tag => (
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
+            <div className="overflow-x-auto">
+              <div className="min-w-[800px]"> {/* 确保最小宽度，防止挤压 */}
+                <div className="grid grid-cols-12 gap-4 px-6 py-3 bg-slate-50 border-b border-slate-200 text-xs font-bold text-slate-400 uppercase tracking-wider">
+                  <div className="col-span-5">文件名称</div>
+                  <div className="col-span-2">知识分类</div>
+                  <div className="col-span-3">应用场景</div>
+                  <div className="col-span-2">核心标签</div>
+                </div>
+                <div className="divide-y divide-slate-100">
+                  {filteredItems.map(item => (
+                    <div key={item.id} className="grid grid-cols-12 gap-4 px-6 py-4 items-center hover:bg-slate-50 transition-colors group relative">
+                      <div
+                        className="col-span-5 pr-2 flex items-center gap-3 cursor-pointer"
+                        onClick={() => handleDownload(item)}
+                        title="点击下载源文件"
+                      >
+                        <div className="p-2 bg-slate-100 rounded-lg text-slate-500 group-hover:bg-blue-50 group-hover:text-blue-500 transition-colors">
+                          {getFileIcon(item.fileType, "w-4 h-4")}
+                        </div>
+                        <div className="overflow-hidden">
+                          <div className="font-semibold text-slate-800 truncate group-hover:text-blue-600 transition-colors">{item.fileName}</div>
+                          <div className="text-xs text-slate-500 truncate mt-0.5">{item.summary}</div>
+                        </div>
+                      </div>
+                      <div className="col-span-2 group/cat flex items-center relative z-10">
                         <button
                           type="button"
-                          key={tag}
-                          onClick={(e) => handleEditTag(item.id, tag, e)}
-                          className="text-[10px] bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded border border-blue-100 hover:bg-blue-100 hover:border-blue-200 transition-colors"
-                          title="点击修改"
+                          onClick={(e) => handleEditCategory(item.id, item.category, e)}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-slate-100 text-slate-600 border border-slate-200 hover:bg-blue-100 hover:text-blue-600 hover:border-blue-200 transition-all cursor-pointer"
+                          title="点击修改分类"
                         >
-                          #{tag}
+                          <span className="truncate max-w-[100px]">{item.category}</span>
+                          <Edit2 size={12} className="shrink-0 opacity-100 md:opacity-0 group-hover/cat:opacity-100 text-slate-400 group-hover/cat:text-blue-500 transition-opacity" />
                         </button>
-                      ))}
-                      <button
-                        type="button"
-                        onClick={(e) => handleAddTag(item.id, e)}
-                        className="text-[10px] w-5 h-5 flex items-center justify-center bg-slate-50 text-slate-400 rounded border border-slate-200 hover:bg-blue-50 hover:text-blue-500 hover:border-blue-200 transition-colors"
-                        title="添加新标签"
-                      >
-                        <Plus size={10} />
-                      </button>
+                      </div>
+                      <div className="col-span-3 text-xs text-slate-600 font-medium flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                        {item.applicability}
+                      </div>
+                      <div className="col-span-2 flex flex-wrap gap-1 items-center justify-between relative z-10">
+                        <div className="flex gap-1 flex-wrap items-center">
+                          {item.tags.map(tag => (
+                            <button
+                              type="button"
+                              key={tag}
+                              onClick={(e) => handleEditTag(item.id, tag, e)}
+                              className="text-[10px] bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded border border-blue-100 hover:bg-blue-100 hover:border-blue-200 transition-colors"
+                              title="点击修改"
+                            >
+                              #{tag}
+                            </button>
+                          ))}
+                          <button
+                            type="button"
+                            onClick={(e) => handleAddTag(item.id, e)}
+                            className="text-[10px] w-5 h-5 flex items-center justify-center bg-slate-50 text-slate-400 rounded border border-slate-200 hover:bg-blue-50 hover:text-blue-500 hover:border-blue-200 transition-colors"
+                            title="添加新标签"
+                          >
+                            <Plus size={10} />
+                          </button>
+                        </div>
+                        <button
+                          onClick={(e) => handleDeleteItem(item.id, e)}
+                          className="p-1.5 text-slate-300 hover:text-red-500 rounded hover:bg-red-50 transition-colors opacity-0 group-hover:opacity-100"
+                          title="删除"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
                     </div>
-                    <button
-                      onClick={(e) => handleDeleteItem(item.id, e)}
-                      className="p-1.5 text-slate-300 hover:text-red-500 rounded hover:bg-red-50 transition-colors opacity-0 group-hover:opacity-100"
-                      title="删除"
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
+                  ))}
                 </div>
-              ))}
+              </div>
             </div>
           </div>
         )}
