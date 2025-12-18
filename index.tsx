@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { createRoot } from 'react-dom/client';
-import { GoogleGenAI, Type } from "@google/genai";
+import React, { useState, useRef, useEffect } from 'react';
+import ReactDOM from 'react-dom/client';
+import { GoogleGenAI, Type } from '@google/genai';
+import { storage } from './src/utils/fileStorage';
 import {
   FileText,
   Search,
@@ -34,13 +35,15 @@ import {
   ZoomIn,
   ZoomOut,
   RotateCcw,
-  Move
+  Move,
+  Wand2,
+  Sparkles,
+  ArrowRight,
+  FolderOpen
 } from 'lucide-react';
 
 // --- Error Boundary ---
-class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean, error: Error | null }> {
-  public state: { hasError: boolean, error: Error | null };
-
+class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean; error: Error | null }> {
   constructor(props: { children: React.ReactNode }) {
     super(props);
     this.state = { hasError: false, error: null };
@@ -74,18 +77,10 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { has
             <div className="flex gap-3">
               <button
                 onClick={() => window.location.reload()}
-                className="flex-1 px-4 py-2.5 bg-slate-100 text-slate-700 font-medium rounded-xl hover:bg-slate-200 transition-colors"
+                className="flex-1 px-6 py-3 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 transition-colors shadow-lg shadow-indigo-100 flex items-center justify-center gap-2"
               >
-                刷新页面
-              </button>
-              <button
-                onClick={() => {
-                  localStorage.removeItem("knowledge_items");
-                  window.location.reload();
-                }}
-                className="flex-1 px-4 py-2.5 bg-red-600 text-white font-medium rounded-xl hover:bg-red-700 shadow-lg shadow-red-200 transition-colors"
-              >
-                清除数据并重置
+                <RotateCcw size={18} />
+                重试加载
               </button>
             </div>
           </div>
@@ -98,6 +93,13 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { has
 
 // --- 类型定义 ---
 
+interface FileNode {
+  name: string;
+  path: string;
+  type: 'directory' | 'file';
+  children?: FileNode[];
+}
+
 interface KnowledgeItem {
   id: string;
   fileName: string;
@@ -107,96 +109,44 @@ interface KnowledgeItem {
   tags: string[];
   applicability: string; // 适用场景
   addedAt: string;
+  filePath?: string; // 物理路径
 }
 
-// --- IndexedDB 文件存储系统 ---
-// 使用 IndexedDB 存储大文件，避免 localStorage 容量限制
-const DB_NAME = "KnowledgeBaseDB";
-const STORE_NAME = "files";
-const DB_VERSION = 1;
 
-const openDB = (): Promise<IDBDatabase> => {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onerror = () => reject(request.error);
-    request.onsuccess = () => resolve(request.result);
-    request.onupgradeneeded = (event) => {
-      const db = (event.target as IDBOpenDBRequest).result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        db.createObjectStore(STORE_NAME);
-      }
-    };
-  });
-};
 
-const saveFileToDB = async (id: string, file: File) => {
-  try {
-    const db = await openDB();
-    return new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, "readwrite");
-      const store = tx.objectStore(STORE_NAME);
-      const request = store.put(file, id);
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
-    });
-  } catch (e) {
-    console.error("Failed to save file to DB", e);
-  }
-};
-
-const getFileFromDB = async (id: string): Promise<File | undefined> => {
-  try {
-    const db = await openDB();
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, "readonly");
-      const store = tx.objectStore(STORE_NAME);
-      const request = store.get(id);
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-    });
-  } catch (e) {
-    console.error("Failed to get file from DB", e);
-    return undefined;
-  }
-};
-
-const deleteFileFromDB = async (id: string) => {
-  try {
-    const db = await openDB();
-    return new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, "readwrite");
-      const store = tx.objectStore(STORE_NAME);
-      const request = store.delete(id);
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
-    });
-  } catch (e) {
-    console.error("Failed to delete file from DB", e);
-  }
-};
-
-const clearDB = async () => {
-  try {
-    const db = await openDB();
-    return new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, "readwrite");
-      const store = tx.objectStore(STORE_NAME);
-      const request = store.clear();
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
-    });
-  } catch (e) {
-    console.error("Failed to clear DB", e);
-  }
-}
 
 // --- 文件读取助手 ---
+const sanitizeAnalysisResult = (result: Partial<KnowledgeItem>): Partial<KnowledgeItem> => {
+  const sanitized = { ...result };
+
+  // 1. 强制分类不能为空
+  sanitized.category = (String(sanitized.category || "").trim()) || "未分类";
+
+  // 2. 强制标签去重、去空、去指令、截断为5个
+  if (Array.isArray(sanitized.tags)) {
+    // 过滤掉长度过长（可能是幻觉）或包含指令词的标签
+    sanitized.tags = Array.from(new Set(
+      sanitized.tags
+        .map(t => String(t).trim())
+        .filter(t => t && t.length < 20 && !t.includes("JSON") && !t.includes("注意") && !t.includes("禁止"))
+    )).slice(0, 5);
+  } else {
+    sanitized.tags = [];
+  }
+
+  // 3. 摘要截断
+  if (sanitized.summary && sanitized.summary.length > 100) {
+    sanitized.summary = sanitized.summary.substring(0, 97) + "...";
+  }
+
+  return sanitized;
+};
+
 const readFileAsBase64 = (file: File): Promise<string> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
-      const result = reader.result as string;
-      const base64 = result.split(',')[1];
+      const base64 = (reader.result as string).split(',')[1];
       resolve(base64);
     };
     reader.onerror = reject;
@@ -213,19 +163,39 @@ const readFileAsText = (file: File): Promise<string> => {
   });
 };
 
-const analyzeContentWithDeepSeek = async (file: File, apiKey: string): Promise<Partial<KnowledgeItem>> => {
+const analyzeContentWithDeepSeek = async (
+  file: File,
+  apiKey: string,
+  modelName: string = "deepseek-chat",
+  rawContent?: string,
+  filePath?: string,
+  existingCategories: string[] = []
+): Promise<Partial<KnowledgeItem>> => {
   if (!apiKey) throw new Error("API_KEY_MISSING");
 
+  const categoryContext = existingCategories.length > 0
+    ? `\n\n目前已有的分类：[${existingCategories.join(', ')}]。如果可能，请优先将文件归入这些分类，或者在其基础上创建更精准的分类。`
+    : "";
+
   const SYSTEM_PROMPT = `
-You are a professional personal knowledge base administrator. The user has uploaded a file. Please analyze its content and extract metadata.
+你是一个专业的个人知识库管理员，拥有工业自动化、软件开发与项目管理的跨界知识背景。
+你的任务是分析用户上传的文件并提取核心元数据。
 
-Output Requirement (JSON):
-1. summary: A one-sentence summary of the core knowledge point (within 50 words).
-2. category: Classification (e.g., Automation Control, Scripting, Project Management, Device Manual).
-3. tags: 3-5 key skill tags (e.g., PLC, Python, PID, Modbus).
-4. applicability: In what work scenario is this file most useful? (e.g., On-site debugging, Report writing).
+分析步骤 (Chain of Thought):
+1. 观察文件名 [${file.name}] 和路径 [${filePath || "未知"}]，识别文件的领域（如：自动化、代码、行政）。
+2. 阅读文件内容，提取核心技术名词或业务逻辑。
+3. 根据已有分类参考，判定最佳归类。
+4. 生成一段精准、无废话的摘要。
 
-Return ONLY the JSON object.
+目前已有的分类参考：${categoryContext}
+
+输出要求 (JSON 格式):
+1. summary: 一句话总结核心知识点 (50字以内)。
+2. category: 归类 (例如: 自动化控制, 编程脚本, 项目管理, 设备手册)。如果无法确定，请归入 "未分类"。
+3. tags: 严格要求 3-5 个关键技能标签。禁止重复，禁止生成冗长的列表，禁止生成包含解释的标签。
+4. applicability: 这个文件在什么工作场景下最有用？(例如: 现场调试时, 写报告时)。
+
+注意：只返回 JSON 对象，不要包含任何推理过程或代码块外的文字。
 `;
 
   try {
@@ -233,65 +203,130 @@ Return ONLY the JSON object.
     const fileType = file.type;
     const fileName = file.name.toLowerCase();
 
-    // DeepSeek (via OpenAI-compatible endpoint) typically handles text best.
-    // For binaries/images, we will just send metadata unless we implement OCR here (skipping for MVP).
-
-    if (fileType.startsWith('text/') ||
+    if (rawContent) {
+      // 头部-中部-尾部 采样逻辑 (针对大文本)
+      if (rawContent.length > 30000) {
+        const head = rawContent.slice(0, 10000);
+        const mid = rawContent.slice(Math.floor(rawContent.length / 2) - 5000, Math.floor(rawContent.length / 2) + 5000);
+        const tail = rawContent.slice(-10000);
+        content = `${head}\n\n[...中间内容略...]\n\n${mid}\n\n[...中间内容略...]\n\n${tail}`;
+      } else {
+        content = rawContent;
+      }
+    } else if (fileType.startsWith('text/') ||
       fileName.endsWith('.py') || fileName.endsWith('.js') || fileName.endsWith('.ts') ||
       fileName.endsWith('.tsx') || fileName.endsWith('.json') || fileName.endsWith('.md') ||
       fileName.endsWith('.csv') || fileName.endsWith('.sql')) {
-      content = await readFileAsText(file);
-      // Truncate to avoid context limit issues (DeepSeek V3 is 64k/128k but safe side 30k chars)
-      content = content.slice(0, 30000);
+      const textContent = await readFileAsText(file);
+      // 采样逻辑
+      if (textContent.length > 30000) {
+        const head = textContent.slice(0, 10000);
+        const mid = textContent.slice(Math.floor(textContent.length / 2) - 5000, Math.floor(textContent.length / 2) + 5000);
+        const tail = textContent.slice(-10000);
+        content = `${head}\n\n[...中间内容略...]\n\n${mid}\n\n[...中间内容略...]\n\n${tail}`;
+      } else {
+        content = textContent;
+      }
     } else {
-      content = `[Binary File] Filename: ${file.name}, Type: ${file.type}. Please infer content from filename.`;
+      content = `[Binary File] Filename: ${file.name}, Type: ${file.type}. Please infer content from filename and path.`;
     }
 
-    const response = await fetch("https://api.deepseek.com/v1/chat/completions", {
+    const body: any = {
+      model: modelName,
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: `File Name: ${file.name}\nFile Path: ${filePath || "N/A"}\n\nFile Content:\n${content}` }
+      ]
+    };
+
+    // Reasoner 模型目前不支持 json_object 模式
+    if (modelName === "deepseek-chat") {
+      body.response_format = { type: "json_object" };
+    }
+
+    const response = await fetch("https://api.deepseek.com/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${apiKey}`
       },
-      body: JSON.stringify({
-        model: "deepseek-chat",
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: `File Name: ${file.name}\n\nFile Content:\n${content}` }
-        ],
-        response_format: { type: "json_object" }
-      })
+      body: JSON.stringify(body)
     });
 
     if (!response.ok) {
-      const err = await response.json();
-      throw new Error(`DeepSeek API Error: ${err.error?.message || response.statusText}`);
+      const errText = await response.text();
+      console.error(`[DeepSeek] HTTP Error ${response.status}:`, errText);
+      throw new Error(`DeepSeek API Error: ${response.status} ${response.statusText}`);
     }
 
     const data = await response.json();
-    const jsonStr = data.choices[0].message.content;
-    return JSON.parse(jsonStr);
+    let jsonStr = data.choices[0].message.content;
 
-  } catch (error) {
-    console.error("DeepSeek Analysis Failed:", error);
+    // 鲁棒的 JSON 解析：处理可能存在的 Markdown 代码块
+    console.log("[DeepSeek] Raw Response Content:", jsonStr);
+
+    const jsonMatch = jsonStr.match(/```json\n([\s\S]*?)\n```/) || jsonStr.match(/```([\s\S]*?)```/);
+    if (jsonMatch) {
+      jsonStr = jsonMatch[1];
+    }
+
+    try {
+      const parsed = JSON.parse(jsonStr.trim()) as Partial<KnowledgeItem>;
+      return sanitizeAnalysisResult(parsed);
+    } catch (parseErr) {
+      console.warn("[DeepSeek] JSON Parse Error, attempting fallback extraction...");
+      const braceMatch = jsonStr.match(/\{[\s\S]*\}/);
+      if (braceMatch) {
+        try {
+          return sanitizeAnalysisResult(JSON.parse(braceMatch[0]));
+        } catch (e) { }
+      }
+      throw parseErr;
+    }
+
+  } catch (error: any) {
+    console.error("[DeepSeek] Analysis Failed:", error.message || error);
     throw error;
   }
 };
 
 // --- API 调用逻辑 (现在接受动态 Key) ---
-const analyzeContentWithGemini = async (file: File, apiKey: string): Promise<Partial<KnowledgeItem>> => {
+const analyzeContentWithGemini = async (
+  file: File,
+  apiKey: string,
+  modelName: string = "gemini-1.5-flash",
+  rawContent?: string,
+  filePath?: string,
+  existingCategories: string[] = []
+): Promise<Partial<KnowledgeItem>> => {
   if (!apiKey) throw new Error("API_KEY_MISSING");
 
-  const ai = new GoogleGenAI({ apiKey: apiKey });
+  // 使用标准的 GoogleGenAI 初始化
+  // 此处 constructor 会在下方调用时重新构造以包含 apiKey 对象
+
+  const categoryContext = existingCategories.length > 0
+    ? `\n\n目前已有的分类：[${existingCategories.join(', ')}]。如果可能，请优先将文件归入这些分类。`
+    : "";
 
   const systemPrompt = `
-    你是一个专业的个人知识库管理员。用户上传了一个文件，请分析其内容并提取元数据。
-    
-    输出要求 (JSON):
-    1. summary: 一句话总结核心知识点 (50字以内)。
-    2. category: 归类 (例如: 自动化控制, 编程脚本, 项目管理, 设备手册)。
-    3. tags: 3-5个关键技能标签 (例如: PLC, Python, PID, Modbus)。
-    4. applicability: 这个文件在什么工作场景下最有用？(例如: 现场调试时, 写报告时)。
+你是一个专业的个人知识库管理员，拥有工业自动化、软件开发与项目管理的跨界知识背景。
+你的任务是分析用户上传的文件并提取核心元数据。
+
+分析步骤 (Chain of Thought):
+1. 观察文件名 [${file.name}] 和路径 [${filePath || "未知"}]，识别文件的领域。
+2. 阅读文件内容，提取核心技术名词或业务逻辑。
+3. 根据已有分类参考，判定最佳归类。
+4. 生成一段精准、无废话的摘要。
+
+${categoryContext}
+
+输出要求 (JSON 格式):
+1. summary: 一句话总结核心知识点 (50字以内)。
+2. category: 归类 (例如: 自动化控制, 编程脚本, 项目管理, 设备手册)。
+3. tags: 严格限制为 3-5 个核心关键词。禁止重复，禁止生成冗长的列表，严禁产生循环输出。
+4. applicability: 这个文件在什么工作场景下最有用？(例如: 现场调试时, 写报告时)。
+
+注意：只返回 JSON，不要有任何多余的文字。如果标签过多，请只保留最重要的 5 个。
   `;
 
   let parts: any[] = [{ text: systemPrompt }];
@@ -300,13 +335,21 @@ const analyzeContentWithGemini = async (file: File, apiKey: string): Promise<Par
     const fileType = file.type;
     const fileName = file.name.toLowerCase();
 
-    // 1. PDF 和 图片
-    if (fileType === 'application/pdf' || fileType.startsWith('image/')) {
+    if (rawContent) {
+      let sampled = rawContent;
+      if (rawContent.length > 30000) {
+        const head = rawContent.slice(0, 10000);
+        const mid = rawContent.slice(Math.floor(rawContent.length / 2) - 5000, Math.floor(rawContent.length / 2) + 5000);
+        const tail = rawContent.slice(-10000);
+        sampled = `${head}\n\n[...中间内容略...]\n\n${mid}\n\n[...中间内容略...]\n\n${tail}`;
+      }
+      parts.push({ text: `文件名为: ${file.name}。\n路径为: ${filePath || "N/A"}\n\n内容采样如下:\n${sampled}` });
+    }
+    else if (fileType === 'application/pdf' || fileType.startsWith('image/')) {
       const base64Data = await readFileAsBase64(file);
-      parts.push({ text: `文件名为: ${file.name}。请根据附带的文件内容进行分析。` });
+      parts.push({ text: `文件名为: ${file.name}。路径为: ${filePath || "N/A"}。请根据附带的文件内容进行分析。` });
       parts.push({ inlineData: { mimeType: fileType, data: base64Data } });
     }
-    // 2. 文本和代码
     else if (
       fileType.startsWith('text/') ||
       fileName.endsWith('.py') || fileName.endsWith('.js') || fileName.endsWith('.ts') ||
@@ -314,22 +357,32 @@ const analyzeContentWithGemini = async (file: File, apiKey: string): Promise<Par
       fileName.endsWith('.csv') || fileName.endsWith('.sql')
     ) {
       const textContent = await readFileAsText(file);
-      const truncatedText = textContent.slice(0, 20000);
-      parts.push({ text: `文件名为: ${file.name}。\n\n文件文本内容如下:\n${truncatedText}` });
+      let sampled = textContent;
+      if (textContent.length > 30000) {
+        const head = textContent.slice(0, 10000);
+        const mid = textContent.slice(Math.floor(textContent.length / 2) - 5000, Math.floor(textContent.length / 2) + 5000);
+        const tail = textContent.slice(-10000);
+        sampled = `${head}\n\n[...中间内容略...]\n\n${mid}\n\n[...中间内容略...]\n\n${tail}`;
+      }
+      parts.push({ text: `文件名为: ${file.name}。\n路径为: ${filePath || "N/A"}\n\n文件文本内容采样如下:\n${sampled}` });
     }
-    // 3. 其他二进制
     else {
       parts.push({
-        text: `用户上传了一个文件名为 "${file.name}" 的文件。
-               由于当前环境无法读取此二进制格式的内容，请你仅根据文件名猜测它可能的内容、分类和标签。`
+        text: `用户上传了一个文件名为 "${file.name}"，路径为 "${filePath || "N/A"}" 的文件。
+               由于当前环境无法读取此二进制格式的内容，请你根据文件名和路径猜测其可能的内容、分类和标签。`
       });
     }
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: { parts: parts },
+    const client = new GoogleGenAI({ apiKey });
+    const targetModel = modelName;
+    console.log(`[Gemini] Requesting with model: ${targetModel}`);
+
+    const result = await (client as any).models.generateContent({
+      model: targetModel,
+      contents: [{ role: 'user', parts: parts }],
       config: {
         responseMimeType: "application/json",
+        maxOutputTokens: 400, // 激进限制，防止死循环
         responseSchema: {
           type: Type.OBJECT,
           properties: {
@@ -342,14 +395,65 @@ const analyzeContentWithGemini = async (file: File, apiKey: string): Promise<Par
       }
     });
 
-    const text = response.text;
-    if (!text) throw new Error("No response from AI");
-    return JSON.parse(text) as Partial<KnowledgeItem>;
+    let text = "";
+    if (result.response && typeof result.response.text === 'function') {
+      text = await result.response.text();
+    } else if (result.text && typeof result.text === 'string') {
+      text = result.text;
+    } else if (result.candidates?.[0]?.content?.parts?.[0]?.text) {
+      text = result.candidates[0].content.parts[0].text;
+    }
 
-  } catch (error) {
-    console.error("Gemini Analysis Failed:", error);
+    if (!text) {
+      throw new Error("AI 响应内容为空，请检查模型权限或 API Key 额度。");
+    }
+
+    console.log("[Gemini] Raw Response Content:", text);
+
+    // 鲁棒的 JSON 解析
+    try {
+      // 1. 尝试直接解析
+      const parsed = JSON.parse(text.trim()) as Partial<KnowledgeItem>;
+      return sanitizeAnalysisResult(parsed);
+    } catch (parseErr) {
+      console.warn("[Gemini] First parse failed, attempting cleanup...");
+
+      // 2. 尝试提取 Markdown 中的 JSON
+      const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/) || text.match(/```([\s\S]*?)```/);
+      let cleanedText = jsonMatch ? jsonMatch[1] : text;
+
+      // 3. 尝试修复截断的 JSON (非常基础的修复)
+      if (cleanedText.includes('"tags": [') && !cleanedText.includes(']')) {
+        console.warn("[Gemini] Detected truncated tags array, attempting fix...");
+        const lastComma = cleanedText.lastIndexOf(',');
+        if (lastComma !== -1) {
+          cleanedText = cleanedText.substring(0, lastComma);
+        }
+        cleanedText += '], "applicability": "已截断" }';
+      }
+
+      try {
+        const braceMatch = cleanedText.match(/\{[\s\S]*\}/);
+        if (braceMatch) {
+          return sanitizeAnalysisResult(JSON.parse(braceMatch[0]));
+        }
+      } catch (e) {
+        throw parseErr;
+      }
+      throw parseErr;
+    }
+
+  } catch (error: any) {
+    console.warn("[Gemini] Analysis Failed:", error.message || error);
+    if (error.message?.includes("404") || error.message?.includes("not found")) {
+      throw new Error("模型不可用。请确认您的 API Key 所在的国家/地区支持 Gemini 1.5 Pro。");
+    }
+    if (error.message?.includes("429") || error.message?.includes("quota")) {
+      throw new Error("触发了 Pro 模型的频率限制。由于 Pro 模型对免费 Key 限制较严，建议稍后再试或切回 Flash 模型。");
+    }
     throw error;
   }
+
 };
 
 // --- 子组件：脑图树节点 (Tree Node) ---
@@ -553,9 +657,15 @@ const SettingsModal = ({
   setDeepSeekApiKey,
   provider,
   setProvider,
+  geminiModel,
+  setGeminiModel,
+  deepSeekModel,
+  setDeepSeekModel,
   onExport,
   onImport,
-  onClear
+  onClear,
+  handleOpenFolder,
+  rootPath
 }: any) => {
   if (!isOpen) return null;
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -600,44 +710,101 @@ const SettingsModal = ({
               </button>
             </div>
 
-            {/* Gemini Key Input */}
+            {/* Gemini Key & Model Input */}
             {provider === 'gemini' && (
-              <div className="space-y-2 animate-in fade-in slide-in-from-top-1">
-                <div className="relative">
+              <div className="space-y-4 animate-in fade-in slide-in-from-top-1">
+                <div className="space-y-2">
+                  <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Gemini API Key</label>
                   <input
                     type="password"
                     value={apiKey}
                     onChange={(e) => setApiKey(e.target.value)}
                     placeholder="请输入 Gemini API Key"
-                    className="w-full pl-4 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+                    className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all"
                   />
+                  <p className="text-xs text-slate-400">
+                    <a href="https://aistudio.google.com/app/apikey" target="_blank" className="text-blue-500 hover:underline">获取 Gemini Key</a>
+                  </p>
                 </div>
-                <p className="text-xs text-slate-400">
-                  <a href="https://aistudio.google.com/app/apikey" target="_blank" className="text-blue-500 hover:underline">获取 Gemini Key</a>
-                </p>
+
+                <div className="space-y-2">
+                  <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">选择模型版本</label>
+                  <select
+                    value={geminiModel}
+                    onChange={(e) => setGeminiModel(e.target.value)}
+                    className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all appearance-none cursor-pointer"
+                  >
+                    <option value="gemini-1.5-flash">Gemini 1.5 Flash (快速、低延迟)</option>
+                    <option value="gemini-1.5-pro">Gemini 1.5 Pro (最强大、分析深)</option>
+                    <option value="gemini-1.5-flash-8b">Gemini 1.5 Flash-8B (极速版本)</option>
+                    <option value="gemini-2.0-flash-exp">Gemini 2.0 Flash Exp (最新预览版)</option>
+                  </select>
+                </div>
               </div>
             )}
 
-            {/* DeepSeek Key Input */}
+            {/* DeepSeek Key & Model Input */}
             {provider === 'deepseek' && (
-              <div className="space-y-2 animate-in fade-in slide-in-from-top-1">
-                <div className="relative">
+              <div className="space-y-4 animate-in fade-in slide-in-from-top-1">
+                <div className="space-y-2">
+                  <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">DeepSeek API Key</label>
                   <input
                     type="password"
                     value={deepSeekApiKey}
                     onChange={(e) => setDeepSeekApiKey(e.target.value)}
                     placeholder="请输入 DeepSeek API Key"
-                    className="w-full pl-4 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+                    className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all"
                   />
+                  <p className="text-xs text-slate-400">
+                    <a href="https://platform.deepseek.com/api_keys" target="_blank" className="text-blue-500 hover:underline">获取 DeepSeek Key</a>
+                  </p>
                 </div>
-                <p className="text-xs text-slate-400">
-                  <a href="https://platform.deepseek.com/api_keys" target="_blank" className="text-blue-500 hover:underline">获取 DeepSeek Key</a>
-                </p>
+
+                <div className="space-y-2">
+                  <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">选择模型版本</label>
+                  <select
+                    value={deepSeekModel}
+                    onChange={(e) => setDeepSeekModel(e.target.value)}
+                    className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all appearance-none cursor-pointer"
+                  >
+                    <option value="deepseek-chat">DeepSeek-V3 (Chat - 速度快)</option>
+                    <option value="deepseek-reasoner">DeepSeek-R1 (Reasoner - 逻辑强)</option>
+                  </select>
+                </div>
               </div>
             )}
           </div>
 
           <div className="h-px bg-slate-100 my-2"></div>
+
+          {/* Electron 文件夹选择 */}
+          {storage.isElectron && (
+            <>
+              <div className="space-y-3">
+                <label className="text-sm font-semibold text-slate-700 flex items-center gap-1.5">
+                  <FolderOpen size={16} /> 存储文件夹
+                </label>
+                <button
+                  onClick={() => {
+                    handleOpenFolder();
+                    onClose();
+                  }}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-xl text-sm font-medium transition-all border border-blue-200"
+                >
+                  <FolderOpen size={16} /> {rootPath ? '更换文件夹' : '选择存储文件夹'}
+                </button>
+                {rootPath && (
+                  <p className="text-xs text-slate-500 break-all">
+                    当前: {rootPath}
+                  </p>
+                )}
+                <p className="text-xs text-slate-400">
+                  所有上传的文件和知识库数据都会保存在此文件夹中
+                </p>
+              </div>
+              <div className="h-px bg-slate-100 my-2"></div>
+            </>
+          )}
 
           {/* 数据管理 */}
           <div className="space-y-3">
@@ -675,6 +842,7 @@ const SettingsModal = ({
 const App = () => {
   // 核心状态
   const [items, setItems] = useState<KnowledgeItem[]>([]);
+  const [fileTree, setFileTree] = useState<FileNode | null>(null); // New State for File Tree
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [viewMode, setViewMode] = useState<'grid' | 'list' | 'mindmap'>('mindmap');
@@ -704,53 +872,240 @@ const App = () => {
   const [apiKey, setApiKey] = useState(() => localStorage.getItem("gemini_api_key") || process.env.API_KEY || "");
   const [deepSeekApiKey, setDeepSeekApiKey] = useState(() => localStorage.getItem("deepseek_api_key") || "");
   const [provider, setProvider] = useState<'gemini' | 'deepseek'>(() => (localStorage.getItem("ai_provider") as any) || 'gemini');
+  const [geminiModel, setGeminiModel] = useState(() => localStorage.getItem("gemini_model") || "gemini-1.5-flash");
+  const [deepSeekModel, setDeepSeekModel] = useState(() => localStorage.getItem("deepseek_model") || "deepseek-chat");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // 初始化：从 localStorage 加载数据
+  // Electron Specific State
+  const [rootPath, setRootPath] = useState<string>("");
+
+  // Auto-Organize State
+  const [organizeState, setOrganizeState] = useState<{
+    isOrganizing: boolean;
+    previewMode: boolean; // Show results before moving
+    pendingResults: { file: FileNode; analysis: Partial<KnowledgeItem> }[];
+    progress: { current: number; total: number };
+  }>({
+    isOrganizing: false,
+    previewMode: true,
+    pendingResults: [],
+    progress: { current: 0, total: 0 }
+  });
+
+  // 初始化：加载数据
   useEffect(() => {
-    const savedData = localStorage.getItem("knowledge_items");
-    if (savedData) {
-      try {
-        const parsedData = JSON.parse(savedData);
-        if (Array.isArray(parsedData)) {
-          // 数据清洗：确保 tags 等必填字段存在
-          const validData = parsedData.map((item: any) => ({
-            ...item,
-            tags: Array.isArray(item.tags) ? item.tags : [], // 确保 tags 是数组
-            summary: item.summary || "",
-            category: item.category || "未分类",
-            fileName: item.fileName || "未知文件"
-          }));
-          setItems(validData);
+    const initData = async () => {
+      const initialRootPath = localStorage.getItem("electron_root_path") || "";
+      if (initialRootPath && storage.setRootPath) {
+        storage.setRootPath(initialRootPath);
+        setRootPath(initialRootPath);
+
+        // Scan directory if in Electron
+        if (storage.scanDirectory) {
+          const tree = await storage.scanDirectory();
+          setFileTree(tree);
         }
-      } catch (e) {
-        console.error("Failed to load local data", e);
       }
-    }
-  }, []);
+
+      const loadedItems = await storage.loadAllItems();
+      setItems(loadedItems);
+    };
+    initData();
+  }, []); // Run only once
 
   // 持久化：当 items 变化时保存
   useEffect(() => {
-    localStorage.setItem("knowledge_items", JSON.stringify(items));
-  }, [items]);
+    if (items.length > 0 || (storage.isElectron && rootPath)) {
+      storage.saveAllItems(items);
+    }
+  }, [items, rootPath]); // Add rootPath dependency for Electron
+  useEffect(() => { localStorage.setItem("ai_provider", provider); }, [provider]);
+  useEffect(() => { localStorage.setItem("gemini_api_key", apiKey); }, [apiKey]);
+  useEffect(() => { localStorage.setItem("deepseek_api_key", deepSeekApiKey); }, [deepSeekApiKey]);
+  useEffect(() => { localStorage.setItem("gemini_model", geminiModel); }, [geminiModel]);
+  useEffect(() => { localStorage.setItem("deepseek_model", deepSeekModel); }, [deepSeekModel]);
 
-  // 持久化：当 API Key 变化时保存
-  useEffect(() => {
-    localStorage.setItem("gemini_api_key", apiKey);
-  }, [apiKey]);
+  // Electron Mode: Open Folder
+  const handleOpenFolder = async () => {
+    if (storage.openDirectory) {
+      const path = await storage.openDirectory();
+      if (path) {
+        setRootPath(path);
+        const loadedItems = await storage.loadAllItems();
+        setItems(loadedItems);
+        // Scan new directory
+        if (storage.scanDirectory) {
+          const tree = await storage.scanDirectory();
+          setFileTree(tree);
+        }
+      }
+    }
+  };
 
-  useEffect(() => {
-    localStorage.setItem("deepseek_api_key", deepSeekApiKey);
-  }, [deepSeekApiKey]);
+  // --- 智能整理逻辑 ---
 
-  useEffect(() => {
-    localStorage.setItem("ai_provider", provider);
-  }, [provider]);
+  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+  // 递归分析文件树
+  const analyzeFileRecursive = async (
+    node: FileNode,
+    results: { file: FileNode; analysis: Partial<KnowledgeItem> }[],
+    existingCategories: string[]
+  ) => {
+    if (node.type === 'file') {
+      try {
+        console.log(`[Batch] Analyzing File: ${node.path}`);
+
+        // 1. 读取内容 (确保 readTextFile 存在)
+        if (!storage.readTextFile) throw new Error("Storage layer does not support reading text files.");
+        const { content, isText } = await storage.readTextFile!(node.path);
+
+        // 2. 调用 AI 分析
+        const currentKey = provider === 'gemini' ? apiKey : deepSeekApiKey;
+        if (!currentKey) throw new Error("API_KEY_MISSING");
+
+        let analysis: Partial<KnowledgeItem>;
+        const mockFile = {
+          name: node.name,
+          type: isText ? 'text/plain' : 'application/octet-stream'
+        } as File;
+
+        // --- 频率节流 (Throttling) ---
+        // 针对 Gemini 免费版，每分钟限制 10 次，建议间隔至少 6 秒
+        if (provider === 'gemini') {
+          await sleep(6500);
+        }
+
+        if (provider === 'deepseek') {
+          analysis = await analyzeContentWithDeepSeek(mockFile, currentKey, deepSeekModel, content, node.path, existingCategories);
+        } else {
+          analysis = await analyzeContentWithGemini(mockFile, currentKey, geminiModel, content, node.path, existingCategories);
+        }
+
+        console.log(`[Batch] Success for ${node.name}:`, analysis.category);
+        results.push({ file: node, analysis });
+      } catch (err: any) {
+        console.error(`[Batch] Failed for ${node.path}:`, err);
+        results.push({
+          file: node,
+          analysis: {
+            category: "未分类",
+            summary: "分析失败",
+            tags: [`错误: ${err.message || "未知错误"}`]
+          }
+        });
+      } finally {
+        // 无论成功失败，都更新进度条
+        setOrganizeState(prev => ({
+          ...prev,
+          progress: { ...prev.progress, current: Math.min(prev.progress.total, prev.progress.current + 1) }
+        }));
+      }
+    } else if (node.children) {
+      for (const child of node.children) {
+        await analyzeFileRecursive(child, results, existingCategories);
+      }
+    }
+  };
+
+  // 开始全量智能整理
+  const handleStartAutoOrganize = async () => {
+    if (!fileTree || !storage.isElectron) return;
+
+    const countFiles = (node: FileNode): number => {
+      if (node.type === 'file') return 1;
+      return (node.children || []).reduce((acc, child) => acc + countFiles(child), 0);
+    };
+
+    const totalFiles = countFiles(fileTree);
+
+    // 提取当前已有的分类
+    const existingCategories = Array.from(new Set(items.map(i => i.category).filter(Boolean))) as string[];
+
+    setOrganizeState(prev => ({
+      ...prev,
+      isOrganizing: true,
+      progress: { current: 0, total: totalFiles },
+      pendingResults: []
+    }));
+
+    const results: { file: FileNode; analysis: Partial<KnowledgeItem> }[] = [];
+    try {
+      await analyzeFileRecursive(fileTree, results, existingCategories);
+    } catch (err) {
+      console.error("Batch analysis failed:", err);
+    }
+
+    setOrganizeState(prev => ({
+      ...prev,
+      pendingResults: results
+    }));
+  };
+
+  // 执行物理整理 (移动文件)
+  const executeOrganize = async () => {
+    if (!rootPath || !storage.ensureDir || !storage.moveFile) return;
+
+    try {
+      setIsAnalyzing(true);
+      const newItems: KnowledgeItem[] = [...items];
+
+      for (const item of organizeState.pendingResults) {
+        const category = item.analysis.category || "未分类";
+        const targetDir = `${rootPath}/${category}`;
+        const targetPath = `${targetDir}/${item.file.name}`;
+
+        // 1. 确保目录存在
+        await storage.ensureDir(targetDir);
+
+        // 2. 移动文件 (简单处理冲突：如果路径不同则移动)
+        if (item.file.path !== targetPath) {
+          await storage.moveFile(item.file.path, targetPath);
+        }
+
+        // 3. 更新/添加元数据
+        const fileExtension = item.file.name.split('.').pop() || "";
+        const knowledgeItem: KnowledgeItem = {
+          id: targetPath, // Electron 模式下使用路径作为 ID
+          fileName: item.file.name,
+          fileType: fileExtension,
+          summary: item.analysis.summary || "",
+          category: category,
+          tags: item.analysis.tags || [],
+          applicability: item.analysis.applicability || "通用",
+          addedAt: new Date().toISOString().split('T')[0],
+          filePath: targetPath
+        };
+
+        const existingIndex = newItems.findIndex(i => i.filePath === item.file.path || i.fileName === item.file.name);
+        if (existingIndex > -1) {
+          newItems[existingIndex] = knowledgeItem;
+        } else {
+          newItems.push(knowledgeItem);
+        }
+      }
+
+      setItems(newItems);
+
+      // 刷新树
+      if (storage.scanDirectory) {
+        const tree = await storage.scanDirectory();
+        setFileTree(tree);
+      }
+
+      setOrganizeState(prev => ({ ...prev, isOrganizing: false, pendingResults: [] }));
+      alert("整理完成！文件已根据 AI 分类重新归位。");
+    } catch (error: any) {
+      alert(`整理失败: ${error.message}`);
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
 
   // 操作：下载文件
   const handleDownload = async (item: KnowledgeItem) => {
     try {
-      const fileBlob = await getFileFromDB(item.id);
+      const fileBlob = await storage.getFile(item.id);
       if (fileBlob) {
         const url = URL.createObjectURL(fileBlob);
         const a = document.createElement('a');
@@ -761,7 +1116,7 @@ const App = () => {
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
       } else {
-        alert("无法下载：未找到源文件（可能是演示数据或本地缓存已被清理）。");
+        alert("无法下载：未找到源文件（可能是演示数据或已被删除）。");
       }
     } catch (e) {
       console.error(e);
@@ -878,11 +1233,36 @@ const App = () => {
     e.dataTransfer.effectAllowed = 'move';
   };
 
-  const handleFileDropOnCategory = (e: React.DragEvent, newCategory: string) => {
-    const fileId = e.dataTransfer.getData('fileId');
-    if (fileId && newCategory) {
+  const handleFileDropOnCategory = async (e: React.DragEvent, newCategoryOrPath: string) => {
+    const fileIdOrPath = e.dataTransfer.getData('fileId');
+    if (!fileIdOrPath || !newCategoryOrPath) return;
+
+    // Electron Mode: Move File
+    if (storage.isElectron && storage.moveFile && fileTree) {
+      try {
+        const fileName = fileIdOrPath.split('/').pop() || fileIdOrPath.split('\\').pop();
+        if (!fileName) return;
+        const newPath = `${newCategoryOrPath}/${fileName}`; // Assuming Unix path for Mac
+
+        await storage.moveFile(fileIdOrPath, newPath);
+
+        // Refresh Tree
+        if (storage.scanDirectory) {
+          const tree = await storage.scanDirectory();
+          setFileTree(tree);
+        }
+
+        // Update items (optional, but good for sync)
+        const loadedItems = await storage.loadAllItems();
+        setItems(loadedItems);
+
+      } catch (error: any) {
+        alert(`Move failed: ${error.message}`);
+      }
+    } else {
+      // Web Mode: Update Category
       setItems(prev => prev.map(item =>
-        item.id === fileId ? { ...item, category: newCategory } : item
+        item.id === fileIdOrPath ? { ...item, category: newCategoryOrPath } : item
       ));
     }
   };
@@ -892,7 +1272,7 @@ const App = () => {
     e?.stopPropagation();
     if (confirm("确定要删除这条知识索引吗？原始文件也将被移除。")) {
       setItems(prev => prev.filter(item => item.id !== id));
-      await deleteFileFromDB(id);
+      await storage.deleteFile(id);
     }
   };
 
@@ -940,7 +1320,9 @@ const App = () => {
   const handleClearAll = async () => {
     if (confirm("警告：此操作将永久清空所有本地知识库数据及已保存的文件！是否继续？")) {
       setItems([]);
-      await clearDB();
+      // 对于 Electron，可能需要清空 JSON 文件内容，而不是删除所有文件（或者删除所有文件）
+      // 简单起见，我们保存空数组
+      storage.saveAllItems([]);
       setShowSettings(false);
     }
   };
@@ -984,16 +1366,17 @@ const App = () => {
 
       try {
         let analysis: Partial<KnowledgeItem>;
+        const existingCategories = Array.from(new Set(items.map(i => i.category).filter(Boolean))) as string[];
 
         if (provider === 'deepseek') {
-          analysis = await analyzeContentWithDeepSeek(file, currentKey);
+          analysis = await analyzeContentWithDeepSeek(file, currentKey, deepSeekModel, undefined, undefined, existingCategories);
         } else {
-          analysis = await analyzeContentWithGemini(file, currentKey);
+          analysis = await analyzeContentWithGemini(file, currentKey, geminiModel, undefined, undefined, existingCategories);
         }
 
-        // 生成唯一ID，并保存文件到 IndexedDB
-        const id = Date.now().toString();
-        await saveFileToDB(id, file);
+        // 生成唯一ID，并保存文件
+        // 1. 保存文件到 Storage Layer (Electron FS 或 IndexedDB)
+        const id = await storage.saveFile(file);
 
         const fileExtension = file.name.split('.').pop();
         const fileType = file.type || fileExtension || 'unknown';
@@ -1084,19 +1467,25 @@ const App = () => {
     dragStartRef.current = null;
   };
 
-  const handleCanvasWheel = (e: React.WheelEvent) => {
-    if (e.ctrlKey || e.metaKey) {
-      // Zoom
-      e.preventDefault();
-      const zoomSensitivity = 0.001;
-      const newScale = Math.min(Math.max(0.5, transform.scale - e.deltaY * zoomSensitivity), 3);
-      setTransform(prev => ({ ...prev, scale: newScale }));
-    } else {
-      // Pan (Optional: map wheel to pan if needed, but standard is vertical scroll)
-      // Here we just let standard scroll behavior happen or stop propagation if we want "infinite canvas" feel
-      // For this implementation, we rely on drag to pan.
-    }
-  };
+  // 使用 ref 手动绑定 wheel 事件以禁用 passive 模式，解决 preventDefault 报错问题
+  const canvasRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const onWheel = (e: WheelEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const zoomSensitivity = 0.001;
+        const newScale = Math.min(Math.max(0.5, transform.scale - e.deltaY * zoomSensitivity), 3);
+        setTransform(prev => ({ ...prev, scale: newScale }));
+      }
+    };
+
+    canvas.addEventListener('wheel', onWheel, { passive: false });
+    return () => canvas.removeEventListener('wheel', onWheel);
+  }, [transform.scale]);
 
   const handleZoomIn = () => setTransform(prev => ({ ...prev, scale: Math.min(prev.scale + 0.2, 3) }));
   const handleZoomOut = () => setTransform(prev => ({ ...prev, scale: Math.max(prev.scale - 0.2, 0.5) }));
@@ -1104,17 +1493,113 @@ const App = () => {
 
   // 渲染脑图逻辑
   const renderMindMap = () => {
+    // 1. Electron File Tree Mode
+    if (fileTree && storage.isElectron) {
+      const renderNode = (node: FileNode) => {
+        // Matching metadata
+        const item = items.find(i => i.fileName === node.name || i.filePath === node.path);
+        // Or if not found, just show name
+
+        if (node.type === 'directory') {
+          return (
+            <TreeNode
+              key={node.path}
+              type={node.path === rootPath ? 'root' : 'category'}
+              dataId={node.path}
+              onDropOnCategory={handleFileDropOnCategory}
+              label={
+                <div className="flex items-center gap-2 group/cat cursor-pointer hover:text-blue-600 transition-colors">
+                  {node.path === rootPath ? <BrainCircuit size={20} /> : <FolderOpen size={16} />}
+                  <span>{node.name}</span>
+                </div>
+              }
+              childrenNodes={node.children ? node.children.map(child => renderNode(child)) : []}
+              defaultCollapsed={false}
+            />
+          );
+        } else {
+          // File Node
+          return (
+            <TreeNode
+              key={node.path}
+              type="file"
+              dataId={node.path}
+              onDragStart={handleFileDragStart}
+              label={
+                <div className="flex flex-col gap-1 w-full relative group/node">
+                  <div
+                    className="flex items-start gap-2.5 cursor-pointer hover:bg-blue-50/50 rounded p-0.5 -m-0.5 transition-colors"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      const matchedItem = items.find(i => i.fileName === node.name); // Simple match
+                      if (matchedItem) handleDownload(matchedItem);
+                      else alert('File not found in index metadata'); // Fallback? Or open file?
+                    }}
+                    title="Drag to move / Click to download"
+                  >
+                    <div className="mt-0.5 shrink-0 bg-slate-50 p-1 rounded-md border border-slate-100">
+                      {getFileIcon(node.name, "w-4 h-4")}
+                    </div>
+                    <span className="truncate font-medium text-slate-700 leading-tight group-hover/node:text-blue-600 transition-colors">{node.name}</span>
+                  </div>
+                </div>
+              }
+              childrenNodes={item?.tags ? Array.from(new Set(item.tags.filter(Boolean))).map((tag, idx) => (
+                <TreeNode key={`elec-tag-${node.path}-${tag}-${idx}`} label={<div className="text-[10px]">#{tag}</div>} type="tag" />
+              )) : []}
+            />
+          );
+        }
+      };
+
+      return (
+        <div
+          ref={canvasRef}
+          className="relative bg-slate-50/50 rounded-2xl border border-slate-200 shadow-inner h-[600px] overflow-hidden cursor-grab active:cursor-grabbing group select-none"
+          onMouseDown={handleCanvasMouseDown}
+          onMouseMove={handleCanvasMouseMove}
+          onMouseUp={handleCanvasMouseUp}
+          onMouseLeave={handleCanvasMouseUp}
+          onTouchStart={handleCanvasTouchStart}
+          onTouchMove={handleCanvasTouchMove}
+          onTouchEnd={handleCanvasTouchEnd}
+          style={{ touchAction: 'none' }}
+        >
+          <div className="absolute inset-0 opacity-10 pointer-events-none"
+            style={{
+              backgroundImage: 'radial-gradient(#94a3b8 1px, transparent 1px)',
+              backgroundSize: '20px 20px',
+              transform: `scale(${transform.scale}) translate(${transform.x / transform.scale}px, ${transform.y / transform.scale}px)`,
+              transformOrigin: '0 0'
+            }}>
+          </div>
+          <div className="absolute bottom-4 right-4 flex flex-col gap-2 bg-white p-1.5 rounded-xl shadow-lg border border-slate-100 z-50">
+            <button onClick={handleZoomIn} className="p-2 hover:bg-slate-100 rounded-lg text-slate-600 transition-colors" title="Zoom In"><ZoomIn size={18} /></button>
+            <button onClick={handleResetView} className="p-2 hover:bg-slate-100 rounded-lg text-slate-600 transition-colors" title="Reset"><RotateCcw size={18} /></button>
+            <button onClick={handleZoomOut} className="p-2 hover:bg-slate-100 rounded-lg text-slate-600 transition-colors" title="Zoom Out"><ZoomOut size={18} /></button>
+          </div>
+          <div
+            className="absolute left-10 top-1/2 transition-transform duration-75 ease-out origin-top-left"
+            style={{ transform: `translate(${transform.x}px, ${transform.y - 200}px) scale(${transform.scale})` }}
+          >
+            {renderNode(fileTree)}
+          </div>
+        </div>
+      );
+    }
+
+    // 2. Fallback: Existing Flat Category Mode (Web)
     if (items.length === 0) return null;
     const categories = Array.from(new Set(filteredItems.map(i => i.category)));
 
     return (
       <div
+        ref={canvasRef}
         className="relative bg-slate-50/50 rounded-2xl border border-slate-200 shadow-inner h-[600px] overflow-hidden cursor-grab active:cursor-grabbing group select-none"
         onMouseDown={handleCanvasMouseDown}
         onMouseMove={handleCanvasMouseMove}
         onMouseUp={handleCanvasMouseUp}
         onMouseLeave={handleCanvasMouseUp}
-        onWheel={handleCanvasWheel}
         onTouchStart={handleCanvasTouchStart}
         onTouchMove={handleCanvasTouchMove}
         onTouchEnd={handleCanvasTouchEnd}
@@ -1154,7 +1639,7 @@ const App = () => {
                 label={
                   <div
                     className="flex items-center gap-2 group/cat cursor-pointer hover:text-blue-600 transition-colors"
-                    onClick={(e) => handleRenameCategory(cat, e)}
+                    onClick={(e) => handleRenameCategory(cat as string, e)}
                     title="点击批量修改此分类名称"
                   >
                     <span>{cat}</span>
@@ -1192,11 +1677,11 @@ const App = () => {
                         </button>
                       </div>
                     }
-                    childrenNodes={file.tags.map(tag => (
+                    childrenNodes={Array.from(new Set(file.tags.filter(Boolean))).map((tag, idx) => (
                       <TreeNode
-                        key={tag}
+                        key={`tag-${file.id}-${tag}-${idx}`}
                         label={
-                          <div title="点击修改或删除标签" onClick={(e) => handleEditTag(file.id, tag, e)}>
+                          <div title="点击修改或删除标签" onClick={(e) => handleEditTag(file.id, tag as string, e)}>
                             #{tag}
                           </div>
                         }
@@ -1224,9 +1709,15 @@ const App = () => {
         setDeepSeekApiKey={setDeepSeekApiKey}
         provider={provider}
         setProvider={setProvider}
+        geminiModel={geminiModel}
+        setGeminiModel={setGeminiModel}
+        deepSeekModel={deepSeekModel}
+        setDeepSeekModel={setDeepSeekModel}
         onExport={handleExport}
         onImport={handleImport}
         onClear={handleClearAll}
+        handleOpenFolder={handleOpenFolder}
+        rootPath={rootPath}
       />
 
       <EditModal
@@ -1237,6 +1728,111 @@ const App = () => {
         initialValue={editState.initialValue}
         placeholder={editState.type === 'edit-tag' ? "输入新名称，留空保存即为删除" : "请输入名称"}
       />
+
+      {/* 智能整理进度与结果模态框 */}
+      {organizeState.isOrganizing && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-md flex items-center justify-center z-[200] p-4">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden animate-in zoom-in-95 duration-300 border border-slate-100">
+            <div className="bg-gradient-to-r from-indigo-600 to-blue-600 p-8 text-white">
+              <div className="flex items-center gap-4 mb-4">
+                <div className="p-3 bg-white/20 rounded-2xl backdrop-blur-sm">
+                  <Wand2 size={32} />
+                </div>
+                <div>
+                  <h2 className="text-2xl font-bold">AI 智能自动整理</h2>
+                  <p className="text-indigo-100 opacity-90">正在扫描并分析您的本地文件夹...</p>
+                </div>
+              </div>
+
+              {organizeState.pendingResults.length < organizeState.progress.total && (
+                <div className="mt-8">
+                  <div className="flex justify-between items-end mb-2">
+                    <span className="text-sm font-medium text-indigo-50">正在分析: 第 {organizeState.progress.current} / {organizeState.progress.total} 个文件</span>
+                    <span className="text-2xl font-bold">{Math.round((organizeState.progress.current / organizeState.progress.total) * 100)}%</span>
+                  </div>
+                  <div className="w-full bg-white/20 rounded-full h-3 overflow-hidden">
+                    <div
+                      className="bg-white h-full transition-all duration-300 ease-out"
+                      style={{ width: `${(organizeState.progress.current / organizeState.progress.total) * 100}%` }}
+                    ></div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="p-8">
+              {organizeState.pendingResults.length === 0 ? (
+                <div className="flex flex-col items-center py-12 text-slate-400">
+                  <Loader2 size={40} className="animate-spin mb-4 text-indigo-500" />
+                  <p>正在读取核心文件内容...</p>
+                </div>
+              ) : (
+                <>
+                  <div className="flex justify-between items-center mb-6">
+                    <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                      <Sparkles size={18} className="text-amber-500" />
+                      分析建议预览 ({organizeState.pendingResults.length} 个文件)
+                    </h3>
+                    {organizeState.pendingResults.length < organizeState.progress.total && (
+                      <span className="text-xs bg-amber-50 text-amber-600 px-3 py-1 rounded-full border border-amber-100 animate-pulse">
+                        正在处理剩余文件...
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="max-h-80 overflow-y-auto mb-6 pr-2 custom-scrollbar">
+                    <div className="space-y-3">
+                      {organizeState.pendingResults.map((result, idx) => (
+                        <div key={idx} className="flex items-start gap-4 p-4 bg-slate-50 border border-slate-100 rounded-2xl hover:border-indigo-200 transition-colors">
+                          <div className="p-2 bg-white rounded-lg shadow-sm">
+                            {getFileIcon(result.file?.name?.split('.').pop() || "")}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="font-bold text-slate-700 truncate block">{result.file?.name || "未知文件"}</span>
+                              <ArrowRight size={14} className="text-slate-300 shrink-0" />
+                              <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${result.analysis?.summary === "分析失败" ? "bg-red-100 text-red-700" : "bg-indigo-100 text-indigo-700"}`}>
+                                {result.analysis?.category || "未分类"}
+                              </span>
+                            </div>
+                            <p className={`text-xs italic line-clamp-1 ${result.analysis?.summary === "分析失败" ? "text-red-400" : "text-slate-500"}`}>
+                              {result.analysis?.summary || "无摘要"}
+                              {result.analysis?.tags && result.analysis.tags.length > 0 && String(result.analysis.tags[0]).startsWith("错误:") && (
+                                <span className="ml-2 not-italic font-bold">({result.analysis.tags[0]})</span>
+                              )}
+                            </p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="flex gap-4">
+                    <button
+                      onClick={() => setOrganizeState(prev => ({ ...prev, isOrganizing: false }))}
+                      className="flex-1 px-6 py-3.5 bg-slate-100 text-slate-600 font-bold rounded-2xl hover:bg-slate-200 transition-all border border-slate-200 active:scale-95"
+                    >
+                      取消
+                    </button>
+                    <button
+                      disabled={organizeState.pendingResults.length < organizeState.progress.total}
+                      onClick={executeOrganize}
+                      className="flex-1 px-6 py-3.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-2xl shadow-xl shadow-indigo-200 transition-all disabled:opacity-50 disabled:shadow-none active:scale-95 flex items-center justify-center gap-2"
+                    >
+                      <CheckCircle2 size={20} />
+                      立即物理移动并归类
+                    </button>
+                  </div>
+
+                  <p className="mt-4 text-[10px] text-slate-400 text-center italic">
+                    警告：此操作将真正在您的硬盘上创建文件夹并移动文件，无法撤销。
+                  </p>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 顶部导航 */}
       <header className="bg-white border-b border-slate-200 sticky top-0 z-50 shadow-sm/50 backdrop-blur-sm bg-white/90">
@@ -1313,6 +1909,18 @@ const App = () => {
               <button onClick={() => setViewMode('list')} className={`p-2 rounded-lg transition-all ${viewMode === 'list' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'}`} title="列表视图"><List size={18} /></button>
               <button onClick={() => setViewMode('mindmap')} className={`p-2 rounded-lg transition-all ${viewMode === 'mindmap' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'}`} title="脑图模式"><Network size={18} /></button>
             </div>
+
+            {/* 智能整理按钮 (仅 Electron) */}
+            {storage.isElectron && (
+              <button
+                onClick={handleStartAutoOrganize}
+                disabled={organizeState.isOrganizing || isAnalyzing}
+                className="flex items-center justify-center gap-2 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl shadow-lg hover:shadow-indigo-200 transition-all cursor-pointer active:scale-95 hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Wand2 size={18} className={organizeState.isOrganizing ? 'animate-pulse' : ''} />
+                <span className="font-medium">智能一键整理</span>
+              </button>
+            )}
 
             {/* 上传按钮 */}
             <label className={`flex-1 md:flex-none flex items-center justify-center gap-2 px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl shadow-lg hover:shadow-slate-300 transition-all cursor-pointer active:scale-95 hover:-translate-y-0.5 ${!apiKey ? 'opacity-80' : ''}`}>
@@ -1479,6 +2087,23 @@ const App = () => {
                           <div className="text-xs text-slate-500 truncate mt-0.5">{item.summary}</div>
                         </div>
                       </div>
+
+                      {/* Electron: Open Folder Button in Settings or Header in Future. For now, add near File Upload if Root Path is missing */}
+                      {storage.isElectron && !rootPath && (
+                        <div className="col-span-12 mb-4 p-4 bg-yellow-50 border border-yellow-200 rounded-xl flex items-center justify-between">
+                          <div className="text-sm text-yellow-800">
+                            <strong>请先选择知识库文件夹</strong>
+                            <p>所有数据将保存到此文件夹中。</p>
+                          </div>
+                          <button
+                            onClick={handleOpenFolder}
+                            className="flex items-center gap-2 px-4 py-2 bg-yellow-100 text-yellow-800 rounded-lg hover:bg-yellow-200 transition-colors font-medium text-sm"
+                          >
+                            <FolderOpen size={16} /> 选择文件夹
+                          </button>
+                        </div>
+                      )}
+
                       <div className="col-span-2 group/cat flex items-center relative z-10">
                         <button
                           type="button"
@@ -1539,7 +2164,7 @@ const App = () => {
 
 const rootElement = document.getElementById('root');
 if (rootElement) {
-  const root = createRoot(rootElement);
+  const root = ReactDOM.createRoot(rootElement);
   root.render(
     <React.StrictMode>
       <ErrorBoundary>
