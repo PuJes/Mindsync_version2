@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import ReactDOM from 'react-dom/client';
 import { GoogleGenAI, Type } from '@google/genai';
-import { storage } from '@/src/utils/fileStorage';
+import { storage } from '@/src/utils/fileStorage.ts';
 import {
   FileText,
   Search,
