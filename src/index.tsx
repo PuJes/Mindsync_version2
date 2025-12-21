@@ -1254,9 +1254,10 @@ const App = () => {
     // Electron Mode: Move File
     if (storage.isElectron && storage.moveFile && fileTree) {
       try {
-        const fileName = fileIdOrPath.split('/').pop() || fileIdOrPath.split('\\').pop();
+        // 修复：使用正则匹配两种路径分隔符，确保在 Windows 下也能正确提取文件名
+        const fileName = fileIdOrPath.split(/[/\\]/).pop();
         if (!fileName) return;
-        const newPath = `${newCategoryOrPath}/${fileName}`; // Assuming Unix path for Mac
+        const newPath = `${newCategoryOrPath}/${fileName}`;
 
         await storage.moveFile(fileIdOrPath, newPath);
 
@@ -1969,10 +1970,11 @@ const App = () => {
 
                       if (isNew) {
                         // 计算相对路径作为分类
-                        const relativePath = scannedFile.path.replace(root, '').replace(/^\//, '');
-                        const parts = relativePath.split('/');
+                        // 修复：兼容 Windows 路径分隔符
+                        const relativePath = scannedFile.path.replace(root, '').replace(/^[/\\]/, '');
+                        const parts = relativePath.split(/[/\\]/);
                         parts.pop(); // 移除文件名
-                        const category = parts.length > 0 ? parts.join('/') : '';  // 空字符串表示根目录
+                        const category = parts.length > 0 ? parts.join('/') : '';  // 统一在 UI 层使用 / 展示
 
                         // 获取文件扩展名
                         const ext = scannedFile.name.split('.').pop()?.toLowerCase() || '';
