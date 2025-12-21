@@ -29,9 +29,11 @@ export interface StorageLayer {
     isElectron: boolean;
     init: () => Promise<void>;
     setRootPath?: (path: string) => void;
+    getRootPath?: () => string;
     saveItem: (item: any) => Promise<void>; // 保存单条元数据
-    saveAllItems: (items: any[]) => Promise<void>; // 保存所有元数据 (index.json)
-    loadAllItems: () => Promise<any[]>;
+    saveAllItems: (items: any) => Promise<void>; // 保存所有元数据 (index.json) - 支持对象或数组
+    loadAllItems: () => Promise<any[]>; // 返回数组格式（用于 UI 显示）
+    loadRawMetadata?: () => Promise<any>; // 返回原始 JSON 对象（用于持久化时避免覆盖）
     saveFile: (file: File) => Promise<string>; // 返回文件 ID 或 路径
     getFile: (idOrPath: string) => Promise<File | Blob | undefined>;
     deleteFile: (idOrPath: string) => Promise<void>;
@@ -76,6 +78,10 @@ const WebStorage: StorageLayer = {
     loadAllItems: async () => {
         const data = localStorage.getItem("knowledge_items");
         return data ? JSON.parse(data) : [];
+    },
+    loadRawMetadata: async () => {
+        const data = localStorage.getItem("knowledge_items");
+        return data ? JSON.parse(data) : null;
     },
     saveFile: async (file) => {
         try {
@@ -130,16 +136,32 @@ const WebStorage: StorageLayer = {
 };
 
 // --- 实现：Electron ---
-let rootPath = localStorage.getItem("electron_root_path") || "";
+let rootPath = "";
 const INDEX_FILE = "knowledge_index.json";
+
+// 🔧 修复：在模块加载时立即从 localStorage 初始化 rootPath
+const initRootPath = () => {
+    const savedPath = localStorage.getItem("electron_root_path");
+    if (savedPath) {
+        rootPath = savedPath;
+        console.log('📂 [Storage] Initialized rootPath from localStorage:', rootPath);
+    }
+};
+// 立即执行初始化
+initRootPath();
 
 const ElectronStorage: StorageLayer = {
     isElectron: true,
-    init: async () => { },
+    init: async () => {
+        // 额外的初始化逻辑（如果需要）
+        initRootPath();
+    },
     setRootPath: (path: string) => {
         rootPath = path;
         localStorage.setItem("electron_root_path", path);
+        console.log('📂 [Storage] setRootPath:', path);
     },
+    getRootPath: () => rootPath,
     saveItem: async () => {
         // Electron 模式下不需要单独保存，使用 saveAllItems
     },
@@ -154,10 +176,19 @@ const ElectronStorage: StorageLayer = {
         await window.electronAPI?.writeFile(`${rootPath}/${INDEX_FILE}`, content);
     },
     loadAllItems: async () => {
-        if (!rootPath) return [];
+        // 🔧 修复：确保 rootPath 已初始化
+        if (!rootPath) {
+            initRootPath();
+        }
+        if (!rootPath) {
+            console.warn('📂 [Storage] loadAllItems: rootPath is empty');
+            return [];
+        }
+        console.log('📂 [Storage] loadAllItems from:', `${rootPath}/${INDEX_FILE}`);
         const result = await window.electronAPI?.readFile(`${rootPath}/${INDEX_FILE}`);
         if (result?.success && result.data) {
             const parsed = JSON.parse(result.data);
+            console.log('📂 [Storage] Loaded metadata:', { version: parsed?.version, fileCount: parsed?.files ? Object.keys(parsed.files).length : (Array.isArray(parsed) ? parsed.length : 0) });
             // 🔧 修复：处理 v3.0 对象格式
             if (parsed && !Array.isArray(parsed) && parsed.version === '3.0' && parsed.files) {
                 // v3.0 格式：将 files 对象转换为数组
@@ -177,7 +208,31 @@ const ElectronStorage: StorageLayer = {
             // v1/v2 数组格式
             return Array.isArray(parsed) ? parsed : [];
         }
+        console.warn('📂 [Storage] loadAllItems: No data found or read failed');
         return [];
+    },
+    // 🔧 新增：返回原始 JSON 对象（用于 persistMetadata 避免覆盖）
+    loadRawMetadata: async () => {
+        if (!rootPath) {
+            initRootPath();
+        }
+        if (!rootPath) {
+            console.warn('📂 [Storage] loadRawMetadata: rootPath is empty');
+            return null;
+        }
+        console.log('📂 [Storage] loadRawMetadata from:', `${rootPath}/${INDEX_FILE}`);
+        const result = await window.electronAPI?.readFile(`${rootPath}/${INDEX_FILE}`);
+        if (result?.success && result.data) {
+            try {
+                const parsed = JSON.parse(result.data);
+                console.log('📂 [Storage] Raw metadata loaded:', { version: parsed?.version, hasFiles: !!parsed?.files });
+                return parsed;
+            } catch (e) {
+                console.error('📂 [Storage] Failed to parse metadata:', e);
+                return null;
+            }
+        }
+        return null;
     },
     saveFile: async (file) => {
         if (!rootPath) throw new Error("请先选择知识库文件夹");

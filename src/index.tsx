@@ -789,11 +789,40 @@ const App = () => {
   }, []);
 
   // 持久化：当 items 变化时保存
+  // 🔧 修复：使用智能合并策略，避免覆盖 v3.0 格式中的 AI 分析结果
   useEffect(() => {
-    if (items.length > 0 || (storage.isElectron && rootPath)) {
-      storage.saveAllItems(items);
-    }
-  }, [items, rootPath]); // Add rootPath dependency for Electron
+    const saveItems = async () => {
+      if (items.length === 0 && !rootPath) return;
+
+      if (storage.isElectron && storage.loadRawMetadata) {
+        // Electron 环境：检查是否存在 v3.0 格式
+        const rawMetadata = await storage.loadRawMetadata();
+
+        if (rawMetadata && rawMetadata.version === '3.0' && rawMetadata.files) {
+          // v3.0 格式已存在，使用合并策略
+          console.log('📂 [Main] v3.0 metadata exists, using merge strategy');
+
+          // 注意：这里不覆盖，因为 fileOps.persistMetadata 会负责更新 v3.0 格式
+          // 主界面的 items 变化主要来自拖拽分类等操作
+          // 这些操作应该通过专门的更新逻辑处理，而不是直接覆盖
+
+          // 仅在没有 v3.0 files 时才保存（初始状态）
+          if (Object.keys(rawMetadata.files).length === 0 && items.length > 0) {
+            console.log('📂 [Main] v3.0 empty, saving items as fallback');
+            await storage.saveAllItems(items);
+          }
+          // 否则跳过保存，让 fileOps 管理数据
+          return;
+        }
+      }
+
+      // Web 环境或无 v3.0 数据：使用原有逻辑
+      console.log('📂 [Main] Saving items directly:', items.length);
+      await storage.saveAllItems(items);
+    };
+
+    saveItems();
+  }, [items, rootPath]);
   useEffect(() => { localStorage.setItem("ai_provider", provider); }, [provider]);
   useEffect(() => { localStorage.setItem("gemini_api_key", apiKey); }, [apiKey]);
   useEffect(() => { localStorage.setItem("deepseek_api_key", deepSeekApiKey); }, [deepSeekApiKey]);
@@ -1931,7 +1960,7 @@ const App = () => {
                         const relativePath = scannedFile.path.replace(root, '').replace(/^\//, '');
                         const parts = relativePath.split('/');
                         parts.pop(); // 移除文件名
-                        const category = parts.length > 0 ? parts.join('/') : '根目录';
+                        const category = parts.length > 0 ? parts.join('/') : '';  // 空字符串表示根目录
 
                         // 获取文件扩展名
                         const ext = scannedFile.name.split('.').pop()?.toLowerCase() || '';

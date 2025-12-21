@@ -66,8 +66,19 @@ export class BatchProcessor {
         let existingHashes: Set<string> = new Set();
         let existingCategories: string[] = [];
         try {
-            const rawData = await storage.loadAllItems();
-            if (rawData && !Array.isArray(rawData) && (rawData as any).version === '3.0') {
+            // 🔧 修复：使用 loadRawMetadata 获取原始 v3.0 格式
+            const rawData = storage.loadRawMetadata
+                ? await storage.loadRawMetadata()
+                : await storage.loadAllItems();
+
+            console.log('📂 [BatchProcessor] Loaded metadata:', {
+                hasData: !!rawData,
+                isArray: Array.isArray(rawData),
+                version: rawData?.version,
+                fileCount: rawData?.files ? Object.keys(rawData.files).length : 0
+            });
+
+            if (rawData && !Array.isArray(rawData) && rawData.version === '3.0') {
                 const metadata = rawData as unknown as FileMetadataV3;
                 if (metadata.files) {
                     existingHashes = new Set(Object.keys(metadata.files));
@@ -77,10 +88,15 @@ export class BatchProcessor {
                             .map((f: any) => f.category || (f.ai && f.ai.category))
                             .filter(Boolean)
                     )];
+                    console.log('📂 [BatchProcessor] Extracted from v3.0:', {
+                        hashCount: existingHashes.size,
+                        categoryCount: existingCategories.length
+                    });
                 }
             } else if (Array.isArray(rawData)) {
                 // v1/v2 数组格式，提取现有分类
                 existingCategories = [...new Set(rawData.map((item: any) => item.category).filter(Boolean))];
+                console.log('📂 [BatchProcessor] Extracted from array format:', { categoryCount: existingCategories.length });
             }
         } catch (e) {
             console.warn('Failed to load metadata for duplicate check', e);

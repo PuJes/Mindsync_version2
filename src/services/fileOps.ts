@@ -35,15 +35,13 @@ export class FileOpsService {
         console.log('📁 [FileOps] executeMove:', {
             fileName: file.file.name,
             sourcePath,
-            targetPath,
+            targetPath: targetPath || '(根目录)',
             originalPath: file.originalPath,
             filePath: (file.file as any).path
         });
 
-        if (!targetPath) {
-            console.error('📁 [FileOps] Error: 未指定目标路径');
-            return { fileId: file.id, success: false, sourcePath, targetPath: '', error: '未指定目标路径' };
-        }
+        // 🔧 修复：空 targetPath 表示根目录，不再视为错误
+        // if (!targetPath) { ... } 已移除
 
         // 🔧 修复：检查是否有有效的源路径
         if (!sourcePath || sourcePath === file.file.name) {
@@ -56,13 +54,17 @@ export class FileOpsService {
             if (!root) throw new Error('Root path not set');
 
             const cleanTarget = targetPath.replace(/^\/+/, '');
-            const fullTargetDir = `${root}/${cleanTarget}`;
+            // 🔧 修复：空分类或 '根目录' 的文件直接放在根目录
+            const fullTargetDir = cleanTarget && cleanTarget !== '根目录' ? `${root}/${cleanTarget}` : root;
             const fileName = file.file.name;
             const fullTargetFile = `${fullTargetDir}/${fileName}`;
 
             console.log('📁 [FileOps] Paths:', { root, cleanTarget, fullTargetDir, fullTargetFile });
 
-            await storage.ensureDir!(fullTargetDir);
+            // 只有需要子目录时才创建
+            if (cleanTarget && cleanTarget !== '根目录') {
+                await storage.ensureDir!(fullTargetDir);
+            }
 
             // 🔧 修复：只要有有效的 sourcePath 就尝试移动
             if (sourcePath === fullTargetFile) {
@@ -144,11 +146,21 @@ export class FileOpsService {
      */
     private async persistMetadata(files: StagedFile[], results: MoveResult[]): Promise<void> {
         try {
-            // 加载现有元数据
-            let metadata: any = await storage.loadAllItems();
+            // 🔧 修复：使用 loadRawMetadata 获取原始 v3.0 格式，避免被转换为数组后丢失数据
+            let metadata: any = storage.loadRawMetadata
+                ? await storage.loadRawMetadata()
+                : await storage.loadAllItems();
+
+            console.log('📂 [FileOps] Loaded existing metadata:', {
+                hasMetadata: !!metadata,
+                isArray: Array.isArray(metadata),
+                version: metadata?.version,
+                existingFileCount: metadata?.files ? Object.keys(metadata.files).length : 0
+            });
 
             // 确保是 v3.0 格式
             if (!metadata || Array.isArray(metadata) || metadata.version !== '3.0') {
+                console.log('📂 [FileOps] Creating new v3.0 metadata structure');
                 metadata = {
                     version: '3.0',
                     config: { taxonomyMode: 'flexible', maxDepth: 3, maxChildren: 10, ignorePatterns: [] },
