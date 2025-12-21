@@ -13,6 +13,9 @@ interface ElectronAPI {
     scanDirectory: (path: string) => Promise<{ success: boolean; data?: any; error?: string }>;
     movePath: (oldPath: string, newPath: string) => Promise<{ success: boolean; error?: string }>;
     readTextFile: (filePath: string, maxChars?: number) => Promise<{ success: boolean; data?: string; isText?: boolean; error?: string }>;
+    computeHash: (filePath: string) => Promise<{ success: boolean; data?: string; error?: string }>;
+    showItemInFolder: (filePath: string) => Promise<{ success: boolean; error?: string }>;
+    openPath: (filePath: string) => Promise<{ success: boolean; error?: string }>;
 }
 
 declare global {
@@ -37,6 +40,10 @@ export interface StorageLayer {
     moveFile?: (oldPath: string, newPath: string) => Promise<void>;
     readTextFile?: (filePath: string) => Promise<{ content: string; isText: boolean }>;
     ensureDir?: (dirPath: string) => Promise<void>;
+    // New methods
+    computeHash?: (filePath: string) => Promise<string>;
+    showItemInFolder?: (filePath: string) => Promise<void>;
+    openPath?: (filePath: string) => Promise<void>;
 }
 
 // --- IndexedDB Helper (Copied from index.tsx) ---
@@ -116,7 +123,10 @@ const WebStorage: StorageLayer = {
         } catch (e) {
             console.error("WebStorage Delete Failed", e);
         }
-    }
+    },
+    computeHash: async () => { throw new Error("Web computeHash not implemented in storage layer, use utility"); },
+    showItemInFolder: async () => { console.warn("Web cannot show item in folder"); },
+    openPath: async () => { console.warn("Web cannot open path"); }
 };
 
 // --- 实现：Electron ---
@@ -147,7 +157,25 @@ const ElectronStorage: StorageLayer = {
         if (!rootPath) return [];
         const result = await window.electronAPI?.readFile(`${rootPath}/${INDEX_FILE}`);
         if (result?.success && result.data) {
-            return JSON.parse(result.data);
+            const parsed = JSON.parse(result.data);
+            // 🔧 修复：处理 v3.0 对象格式
+            if (parsed && !Array.isArray(parsed) && parsed.version === '3.0' && parsed.files) {
+                // v3.0 格式：将 files 对象转换为数组
+                return Object.entries(parsed.files).map(([hash, meta]: [string, any]) => ({
+                    id: meta.id || hash,
+                    fileName: meta.originalName || 'Unknown',  // 🔧 修复：使用 fileName 而非 name
+                    fileType: meta.fileType || 'file',
+                    category: meta.category || meta.ai?.category || '未分类',
+                    summary: meta.ai?.summary || '',
+                    tags: meta.ai?.tags || [],
+                    filePath: meta.currentPath,
+                    addedAt: meta.addedAt || new Date().toISOString().split('T')[0],
+                    applicability: meta.ai?.applicability || meta.applicability || '待分析',
+                    ...meta
+                }));
+            }
+            // v1/v2 数组格式
+            return Array.isArray(parsed) ? parsed : [];
         }
         return [];
     },
@@ -240,6 +268,23 @@ const ElectronStorage: StorageLayer = {
         const result = await window.electronAPI?.ensureDir(dirPath);
         if (!result?.success) {
             throw new Error(result?.error || "创建目录失败");
+        }
+    },
+    computeHash: async (filePath: string) => {
+        const result = await window.electronAPI?.computeHash(filePath);
+        if (result?.success) return result.data!;
+        throw new Error(result?.error || "Hash computation failed");
+    },
+    showItemInFolder: async (filePath: string) => {
+        const result = await window.electronAPI?.showItemInFolder(filePath);
+        if (!result?.success) {
+            throw new Error(result?.error || "无法在文件夹中显示文件");
+        }
+    },
+    openPath: async (filePath: string) => {
+        const result = await window.electronAPI?.openPath(filePath);
+        if (!result?.success) {
+            throw new Error(result?.error || "无法打开路径");
         }
     }
 };

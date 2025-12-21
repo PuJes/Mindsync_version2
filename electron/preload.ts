@@ -15,4 +15,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     scanDirectory: (path: string) => ipcRenderer.invoke('fs:scanDirectory', path),
     movePath: (oldPath: string, newPath: string) => ipcRenderer.invoke('fs:movePath', oldPath, newPath),
     readTextFile: (filePath: string, maxChars?: number) => ipcRenderer.invoke('fs:readTextFile', filePath, maxChars),
+    computeHash: (filePath: string) => ipcRenderer.invoke('fs:computeHash', filePath),
+    showItemInFolder: (filePath: string) => ipcRenderer.invoke('shell:showItemInFolder', filePath),
+    openPath: (filePath: string) => ipcRenderer.invoke('shell:openPath', filePath),
 });

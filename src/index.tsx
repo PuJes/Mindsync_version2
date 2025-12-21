@@ -2,6 +2,9 @@ import React, { useState, useRef, useEffect } from 'react';
 import ReactDOM from 'react-dom/client';
 import { GoogleGenAI, Type } from '@google/genai';
 import { storage } from './utils/fileStorage.ts';
+import { ReviewDashboard } from './components/ReviewDashboard';
+import { SearchPanel } from './components/SearchPanel';
+import { useStagingStore } from './store/stagingStore';
 import {
   FileText,
   Search,
@@ -39,12 +42,17 @@ import {
   Wand2,
   Sparkles,
   ArrowRight,
-  FolderOpen
+  FolderOpen,
+  FolderTree,
+  RefreshCw,
+  Folder
 } from 'lucide-react';
+import { TaxonomySettingsPanel } from './components/TaxonomySettingsPanel';
+
 
 // --- Error Boundary ---
-class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean; error: Error | null }> {
-  constructor(props: { children: React.ReactNode }) {
+class ErrorBoundary extends React.Component<any, any> {
+  constructor(props: any) {
     super(props);
     this.state = { hasError: false, error: null };
   }
@@ -58,7 +66,7 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { has
   }
 
   render() {
-    if (this.state.hasError) {
+    if ((this.state as any).hasError) {
       return (
         <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
           <div className="bg-white p-8 rounded-2xl shadow-xl max-w-lg w-full border border-red-100">
@@ -70,7 +78,7 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { has
 
             <div className="bg-slate-50 p-4 rounded-xl mb-6 text-left overflow-auto max-h-40 border border-slate-200">
               <code className="text-xs text-red-600 font-mono break-all">
-                {this.state.error?.message}
+                {(this.state as any).error?.message}
               </code>
             </div>
 
@@ -163,298 +171,118 @@ const readFileAsText = (file: File): Promise<string> => {
   });
 };
 
-const analyzeContentWithDeepSeek = async (
+// --- 智能判断是否可分析的后缀白名单 ---
+const ANALYZABLE_EXTENSIONS = ['txt', 'md', 'pdf', 'doc', 'docx', 'py', 'js', 'ts', 'tsx', 'jsx', 'html', 'css', 'json', 'csv', 'ppt', 'pptx', 'xlsx', 'xls', 'c', 'cpp', 'go', 'rs', 'java'];
+
+const isAnalyzable = (fileName: string) => {
+  const ext = fileName.split('.').pop()?.toLowerCase();
+  return ext && ANALYZABLE_EXTENSIONS.includes(ext);
+};
+
+// --- API 调用逻辑 ---
+
+async function analyzeContentWithDeepSeek(
   file: File,
   apiKey: string,
   modelName: string = "deepseek-chat",
   rawContent?: string,
   filePath?: string,
   existingCategories: string[] = []
-): Promise<Partial<KnowledgeItem>> => {
-  if (!apiKey) throw new Error("API_KEY_MISSING");
+): Promise<Partial<KnowledgeItem>> {
+  if (!isAnalyzable(file.name)) {
+    return {
+      category: "无法分析",
+      summary: "由于文件格式不支持或为二进制文件，AI 无法直接读取其详细内容。建议手动归类。",
+      tags: ["二进制", "待处理"],
+      applicability: "文件存档"
+    };
+  }
 
-  const categoryContext = existingCategories.length > 0
-    ? `\n\n目前已有的分类：[${existingCategories.join(', ')}]。如果可能，请优先将文件归入这些分类，或者在其基础上创建更精准的分类。`
-    : "";
+  const prompt = `你是一个专业的知识整理助手。请分析以下文件的内容，并将其整理为结构化的知识索引信息。
 
-  const SYSTEM_PROMPT = `
-你是一个专业的个人知识库管理员，拥有工业自动化、软件开发与项目管理的跨界知识背景。
-你的任务是分析用户上传的文件并提取核心元数据。
+【已有分类参考】: ${existingCategories.length > 0 ? existingCategories.join(', ') : '无'}
+【规则】:
+1. 分类: 优先匹配相似的【已有分类】，若不匹配则创建新分类（如：技术文档/前端）。
+2. 标签: 严格生成 3-5 个，去重，每个标签 2-4 字。
+3. 摘要: 包含一句话概述 + 3个核心要点。
+4. 返回格式: 纯 JSON，不含格式块。
 
-分析步骤 (Chain of Thought):
-1. 观察文件名 [${file.name}] 和路径 [${filePath || "未知"}]，识别文件的领域（如：自动化、代码、行政）。
-2. 阅读文件内容，提取核心技术名词或业务逻辑。
-3. 根据已有分类参考，判定最佳归类。
-4. 生成一段精准、无废话的摘要。
+文件名: ${file.name}
+文件内容摘要: ${rawContent ? rawContent.substring(0, 5000) : "无法直接读取内容"}
 
-目前已有的分类参考：${categoryContext}
-
-输出要求 (JSON 格式):
-1. summary: 一句话总结核心知识点 (50字以内)。
-2. category: 归类 (例如: 自动化控制, 编程脚本, 项目管理, 设备手册)。如果无法确定，请归入 "未分类"。
-3. tags: 严格要求 3-5 个关键技能标签。禁止重复，禁止生成冗长的列表，禁止生成包含解释的标签。
-4. applicability: 这个文件在什么工作场景下最有用？(例如: 现场调试时, 写报告时)。
-
-注意：只返回 JSON 对象，不要包含任何推理过程或代码块外的文字。
-`;
+请返回 JSON:
+{
+  "category": "分类名称",
+  "summary": "详细摘要",
+  "tags": ["标签1", "标签2", "标签3"],
+  "applicability": "适用场景"
+}`;
 
   try {
-    let content = "";
-    const fileType = file.type;
-    const fileName = file.name.toLowerCase();
-
-    if (rawContent) {
-      // 头部-中部-尾部 采样逻辑 (针对大文本)
-      if (rawContent.length > 30000) {
-        const head = rawContent.slice(0, 10000);
-        const mid = rawContent.slice(Math.floor(rawContent.length / 2) - 5000, Math.floor(rawContent.length / 2) + 5000);
-        const tail = rawContent.slice(-10000);
-        content = `${head}\n\n[...中间内容略...]\n\n${mid}\n\n[...中间内容略...]\n\n${tail}`;
-      } else {
-        content = rawContent;
-      }
-    } else if (fileType.startsWith('text/') ||
-      fileName.endsWith('.py') || fileName.endsWith('.js') || fileName.endsWith('.ts') ||
-      fileName.endsWith('.tsx') || fileName.endsWith('.json') || fileName.endsWith('.md') ||
-      fileName.endsWith('.csv') || fileName.endsWith('.sql')) {
-      const textContent = await readFileAsText(file);
-      // 采样逻辑
-      if (textContent.length > 30000) {
-        const head = textContent.slice(0, 10000);
-        const mid = textContent.slice(Math.floor(textContent.length / 2) - 5000, Math.floor(textContent.length / 2) + 5000);
-        const tail = textContent.slice(-10000);
-        content = `${head}\n\n[...中间内容略...]\n\n${mid}\n\n[...中间内容略...]\n\n${tail}`;
-      } else {
-        content = textContent;
-      }
-    } else {
-      content = `[Binary File] Filename: ${file.name}, Type: ${file.type}. Please infer content from filename and path.`;
-    }
-
-    const body: any = {
-      model: modelName,
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: `File Name: ${file.name}\nFile Path: ${filePath || "N/A"}\n\nFile Content:\n${content}` }
-      ]
-    };
-
-    // Reasoner 模型目前不支持 json_object 模式
-    if (modelName === "deepseek-chat") {
-      body.response_format = { type: "json_object" };
-    }
-
     const response = await fetch("https://api.deepseek.com/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${apiKey}`
       },
-      body: JSON.stringify(body)
+      body: JSON.stringify({
+        model: modelName,
+        messages: [{ role: "user", content: prompt }],
+        response_format: modelName === "deepseek-chat" ? { type: "json_object" } : undefined
+      })
     });
 
-    if (!response.ok) {
-      const errText = await response.text();
-      console.error(`[DeepSeek] HTTP Error ${response.status}:`, errText);
-      throw new Error(`DeepSeek API Error: ${response.status} ${response.statusText}`);
-    }
-
     const data = await response.json();
-    let jsonStr = data.choices[0].message.content;
-
-    // 鲁棒的 JSON 解析：处理可能存在的 Markdown 代码块
-    console.log("[DeepSeek] Raw Response Content:", jsonStr);
-
-    const jsonMatch = jsonStr.match(/```json\n([\s\S]*?)\n```/) || jsonStr.match(/```([\s\S]*?)```/);
-    if (jsonMatch) {
-      jsonStr = jsonMatch[1];
-    }
-
-    try {
-      const parsed = JSON.parse(jsonStr.trim()) as Partial<KnowledgeItem>;
-      return sanitizeAnalysisResult(parsed);
-    } catch (parseErr) {
-      console.warn("[DeepSeek] JSON Parse Error, attempting fallback extraction...");
-      const braceMatch = jsonStr.match(/\{[\s\S]*\}/);
-      if (braceMatch) {
-        try {
-          return sanitizeAnalysisResult(JSON.parse(braceMatch[0]));
-        } catch (e) { }
-      }
-      throw parseErr;
-    }
-
-  } catch (error: any) {
-    console.error("[DeepSeek] Analysis Failed:", error.message || error);
-    throw error;
+    let resultText = data.choices[0].message.content;
+    resultText = resultText.replace(/```json/g, "").replace(/```/g, "").trim();
+    return JSON.parse(resultText);
+  } catch (err) {
+    console.error("DeepSeek Error:", err);
+    throw err;
   }
-};
+}
 
-// --- API 调用逻辑 (现在接受动态 Key) ---
-const analyzeContentWithGemini = async (
+async function analyzeContentWithGemini(
   file: File,
   apiKey: string,
   modelName: string = "gemini-1.5-flash",
   rawContent?: string,
   filePath?: string,
   existingCategories: string[] = []
-): Promise<Partial<KnowledgeItem>> => {
-  if (!apiKey) throw new Error("API_KEY_MISSING");
-
-  // 使用标准的 GoogleGenAI 初始化
-  // 此处 constructor 会在下方调用时重新构造以包含 apiKey 对象
-
-  const categoryContext = existingCategories.length > 0
-    ? `\n\n目前已有的分类：[${existingCategories.join(', ')}]。如果可能，请优先将文件归入这些分类。`
-    : "";
-
-  const systemPrompt = `
-你是一个专业的个人知识库管理员，拥有工业自动化、软件开发与项目管理的跨界知识背景。
-你的任务是分析用户上传的文件并提取核心元数据。
-
-分析步骤 (Chain of Thought):
-1. 观察文件名 [${file.name}] 和路径 [${filePath || "未知"}]，识别文件的领域。
-2. 阅读文件内容，提取核心技术名词或业务逻辑。
-3. 根据已有分类参考，判定最佳归类。
-4. 生成一段精准、无废话的摘要。
-
-${categoryContext}
-
-输出要求 (JSON 格式):
-1. summary: 一句话总结核心知识点 (50字以内)。
-2. category: 归类 (例如: 自动化控制, 编程脚本, 项目管理, 设备手册)。
-3. tags: 严格限制为 3-5 个核心关键词。禁止重复，禁止生成冗长的列表，严禁产生循环输出。
-4. applicability: 这个文件在什么工作场景下最有用？(例如: 现场调试时, 写报告时)。
-
-注意：只返回 JSON，不要有任何多余的文字。如果标签过多，请只保留最重要的 5 个。
-  `;
-
-  let parts: any[] = [{ text: systemPrompt }];
-
-  try {
-    const fileType = file.type;
-    const fileName = file.name.toLowerCase();
-
-    if (rawContent) {
-      let sampled = rawContent;
-      if (rawContent.length > 30000) {
-        const head = rawContent.slice(0, 10000);
-        const mid = rawContent.slice(Math.floor(rawContent.length / 2) - 5000, Math.floor(rawContent.length / 2) + 5000);
-        const tail = rawContent.slice(-10000);
-        sampled = `${head}\n\n[...中间内容略...]\n\n${mid}\n\n[...中间内容略...]\n\n${tail}`;
-      }
-      parts.push({ text: `文件名为: ${file.name}。\n路径为: ${filePath || "N/A"}\n\n内容采样如下:\n${sampled}` });
-    }
-    else if (fileType === 'application/pdf' || fileType.startsWith('image/')) {
-      const base64Data = await readFileAsBase64(file);
-      parts.push({ text: `文件名为: ${file.name}。路径为: ${filePath || "N/A"}。请根据附带的文件内容进行分析。` });
-      parts.push({ inlineData: { mimeType: fileType, data: base64Data } });
-    }
-    else if (
-      fileType.startsWith('text/') ||
-      fileName.endsWith('.py') || fileName.endsWith('.js') || fileName.endsWith('.ts') ||
-      fileName.endsWith('.tsx') || fileName.endsWith('.json') || fileName.endsWith('.md') ||
-      fileName.endsWith('.csv') || fileName.endsWith('.sql')
-    ) {
-      const textContent = await readFileAsText(file);
-      let sampled = textContent;
-      if (textContent.length > 30000) {
-        const head = textContent.slice(0, 10000);
-        const mid = textContent.slice(Math.floor(textContent.length / 2) - 5000, Math.floor(textContent.length / 2) + 5000);
-        const tail = textContent.slice(-10000);
-        sampled = `${head}\n\n[...中间内容略...]\n\n${mid}\n\n[...中间内容略...]\n\n${tail}`;
-      }
-      parts.push({ text: `文件名为: ${file.name}。\n路径为: ${filePath || "N/A"}\n\n文件文本内容采样如下:\n${sampled}` });
-    }
-    else {
-      parts.push({
-        text: `用户上传了一个文件名为 "${file.name}"，路径为 "${filePath || "N/A"}" 的文件。
-               由于当前环境无法读取此二进制格式的内容，请你根据文件名和路径猜测其可能的内容、分类和标签。`
-      });
-    }
-
-    const client = new GoogleGenAI({ apiKey });
-    const targetModel = modelName;
-    console.log(`[Gemini] Requesting with model: ${targetModel}`);
-
-    const result = await (client as any).models.generateContent({
-      model: targetModel,
-      contents: [{ role: 'user', parts: parts }],
-      config: {
-        responseMimeType: "application/json",
-        maxOutputTokens: 400, // 激进限制，防止死循环
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            summary: { type: Type.STRING },
-            category: { type: Type.STRING },
-            tags: { type: Type.ARRAY, items: { type: Type.STRING } },
-            applicability: { type: Type.STRING },
-          }
-        }
-      }
-    });
-
-    let text = "";
-    if (result.response && typeof result.response.text === 'function') {
-      text = await result.response.text();
-    } else if (result.text && typeof result.text === 'string') {
-      text = result.text;
-    } else if (result.candidates?.[0]?.content?.parts?.[0]?.text) {
-      text = result.candidates[0].content.parts[0].text;
-    }
-
-    if (!text) {
-      throw new Error("AI 响应内容为空，请检查模型权限或 API Key 额度。");
-    }
-
-    console.log("[Gemini] Raw Response Content:", text);
-
-    // 鲁棒的 JSON 解析
-    try {
-      // 1. 尝试直接解析
-      const parsed = JSON.parse(text.trim()) as Partial<KnowledgeItem>;
-      return sanitizeAnalysisResult(parsed);
-    } catch (parseErr) {
-      console.warn("[Gemini] First parse failed, attempting cleanup...");
-
-      // 2. 尝试提取 Markdown 中的 JSON
-      const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/) || text.match(/```([\s\S]*?)```/);
-      let cleanedText = jsonMatch ? jsonMatch[1] : text;
-
-      // 3. 尝试修复截断的 JSON (非常基础的修复)
-      if (cleanedText.includes('"tags": [') && !cleanedText.includes(']')) {
-        console.warn("[Gemini] Detected truncated tags array, attempting fix...");
-        const lastComma = cleanedText.lastIndexOf(',');
-        if (lastComma !== -1) {
-          cleanedText = cleanedText.substring(0, lastComma);
-        }
-        cleanedText += '], "applicability": "已截断" }';
-      }
-
-      try {
-        const braceMatch = cleanedText.match(/\{[\s\S]*\}/);
-        if (braceMatch) {
-          return sanitizeAnalysisResult(JSON.parse(braceMatch[0]));
-        }
-      } catch (e) {
-        throw parseErr;
-      }
-      throw parseErr;
-    }
-
-  } catch (error: any) {
-    console.warn("[Gemini] Analysis Failed:", error.message || error);
-    if (error.message?.includes("404") || error.message?.includes("not found")) {
-      throw new Error("模型不可用。请确认您的 API Key 所在的国家/地区支持 Gemini 1.5 Pro。");
-    }
-    if (error.message?.includes("429") || error.message?.includes("quota")) {
-      throw new Error("触发了 Pro 模型的频率限制。由于 Pro 模型对免费 Key 限制较严，建议稍后再试或切回 Flash 模型。");
-    }
-    throw error;
+): Promise<Partial<KnowledgeItem>> {
+  if (!isAnalyzable(file.name)) {
+    return {
+      category: "无法分析",
+      summary: "该文件格式暂不支持深度内容分析或为加密/二进制文件。",
+      tags: ["无法读取"],
+      applicability: "归档"
+    };
   }
 
-};
+  const client = new GoogleGenAI({ apiKey });
+  const result = await (client as any).models.generateContent({
+    model: modelName,
+    contents: [{
+      role: 'user', parts: [{
+        text: `分析文件并返回 JSON。已有分类：${existingCategories.join(', ') || '无'}。
+要求：分类优先匹配已有；标签精准 3-5 个；摘要包含核心点。
+文件名: ${file.name}
+预览: ${rawContent ? rawContent.substring(0, 5000) : "请根据文件名推测"}`
+      }]
+    }],
+    config: { responseMimeType: "application/json" }
+  });
+
+  let text = "";
+  if (result.response && typeof result.response.text === 'function') {
+    text = await result.response.text();
+  } else if (result.text && typeof result.text === 'string') {
+    text = result.text;
+  }
+
+  return JSON.parse(text);
+}
+;
 
 // --- 子组件：脑图树节点 (Tree Node) ---
 interface TreeNodeProps {
@@ -571,7 +399,7 @@ const TreeNode: React.FC<TreeNodeProps> = ({
 
 // --- 图标助手 ---
 const getFileIcon = (fileType: string, className?: string) => {
-  const type = fileType.toLowerCase();
+  const type = (fileType || '').toLowerCase();
   if (type.includes('pdf')) return <FileText className={`text-red-500 ${className}`} />;
   if (type.includes('ppt')) return <Presentation className={`text-orange-500 ${className}`} />;
   if (type.includes('code') || type.includes('py') || type.includes('js') || type.includes('ts')) return <FileCode className={`text-blue-500 ${className}`} />;
@@ -665,7 +493,8 @@ const SettingsModal = ({
   onImport,
   onClear,
   handleOpenFolder,
-  rootPath
+  rootPath,
+  setShowTaxonomySettings
 }: any) => {
   if (!isOpen) return null;
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -806,6 +635,25 @@ const SettingsModal = ({
             </>
           )}
 
+          {/* 分类控制中心 */}
+          <div className="space-y-3">
+            <label className="text-sm font-semibold text-slate-700 flex items-center gap-1.5">
+              <FolderTree size={16} /> 分类控制中心
+            </label>
+            <button
+              onClick={() => {
+                onClose();
+                setShowTaxonomySettings(true);
+              }}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 rounded-xl text-sm font-medium transition-all border border-indigo-100"
+            >
+              <Settings size={16} /> 配置分类模式与规则
+            </button>
+            <p className="text-xs text-slate-400">
+              严格/灵活模式切换、分类深度限制、忽略规则管理
+            </p>
+          </div>
+
           {/* 数据管理 */}
           <div className="space-y-3">
             <label className="text-sm font-semibold text-slate-700 flex items-center gap-1.5">
@@ -840,12 +688,17 @@ const SettingsModal = ({
 // --- 主组件 ---
 
 const App = () => {
+  // --- Staging Store (v3.0) ---
+  const { workflowStatus, setWorkflowStatus, addFiles, files: stagingFiles } = useStagingStore();
+
   // 核心状态
   const [items, setItems] = useState<KnowledgeItem[]>([]);
   const [fileTree, setFileTree] = useState<FileNode | null>(null); // New State for File Tree
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [showAdvancedSearch, setShowAdvancedSearch] = useState(false);
   const [viewMode, setViewMode] = useState<'grid' | 'list' | 'mindmap'>('mindmap');
+  const [isDragging, setIsDragging] = useState(false); // Global Drag State
 
   // 编辑交互状态 (取代 Prompt)
   const [editState, setEditState] = useState<{
@@ -862,13 +715,9 @@ const App = () => {
     title: ''
   });
 
-  // 脑图画布状态
-  const [transform, setTransform] = useState({ x: 0, y: 0, scale: 1 });
-  const [isDraggingCanvas, setIsDraggingCanvas] = useState(false);
-  const dragStartRef = useRef<{ x: number; y: number } | null>(null);
-
   // 设置相关状态
   const [showSettings, setShowSettings] = useState(false);
+  const [showTaxonomySettings, setShowTaxonomySettings] = useState(false);
   const [apiKey, setApiKey] = useState(() => localStorage.getItem("gemini_api_key") || process.env.API_KEY || "");
   const [deepSeekApiKey, setDeepSeekApiKey] = useState(() => localStorage.getItem("deepseek_api_key") || "");
   const [provider, setProvider] = useState<'gemini' | 'deepseek'>(() => (localStorage.getItem("ai_provider") as any) || 'gemini');
@@ -878,6 +727,9 @@ const App = () => {
 
   // Electron Specific State
   const [rootPath, setRootPath] = useState<string>("");
+
+  // Onboarding State
+  const [isOnboarding, setIsOnboarding] = useState(() => localStorage.getItem("onboarding_complete") !== "true");
 
   // Auto-Organize State
   const [organizeState, setOrganizeState] = useState<{
@@ -891,6 +743,13 @@ const App = () => {
     pendingResults: [],
     progress: { current: 0, total: 0 }
   });
+
+  // --- 脑图交互逻辑 State ---
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const [transform, setTransform] = useState({ x: 0, y: 0, scale: 1 });
+  const [isDraggingCanvas, setIsDraggingCanvas] = useState(false);
+  const [lastMousePos, setLastMousePos] = useState({ x: 0, y: 0 });
+  const dragStartRef = useRef<{ x: number; y: number } | null>(null);
 
   // 初始化：加载数据
   useEffect(() => {
@@ -912,6 +771,22 @@ const App = () => {
     };
     initData();
   }, []); // Run only once
+
+  // 🔧 监听知识库刷新事件（从 ReviewDashboard 返回时触发）
+  useEffect(() => {
+    const handleRefresh = async () => {
+      console.log('🔄 [Main] Refreshing knowledge base...');
+      const loadedItems = await storage.loadAllItems();
+      setItems(loadedItems);
+      if (storage.scanDirectory) {
+        const tree = await storage.scanDirectory();
+        setFileTree(tree);
+      }
+    };
+
+    window.addEventListener('refresh-knowledge-base', handleRefresh);
+    return () => window.removeEventListener('refresh-knowledge-base', handleRefresh);
+  }, []);
 
   // 持久化：当 items 变化时保存
   useEffect(() => {
@@ -1010,101 +885,199 @@ const App = () => {
 
   // 开始全量智能整理
   const handleStartAutoOrganize = async () => {
-    if (!fileTree || !storage.isElectron) return;
+    console.log('🔍 handleStartAutoOrganize called', { fileTree: !!fileTree, isElectron: storage.isElectron });
 
-    const countFiles = (node: FileNode): number => {
-      if (node.type === 'file') return 1;
-      return (node.children || []).reduce((acc, child) => acc + countFiles(child), 0);
+    if (!storage.isElectron) {
+      alert('此功能仅在桌面版可用');
+      return;
+    }
+
+    if (!fileTree) {
+      alert('请先选择一个文件夹');
+      return;
+    }
+
+    // 🔧 P1 修复：收集所有文件并接入 stagingStore + batchProcessor
+    const collectFiles = (node: FileNode): { name: string; path: string }[] => {
+      if (node.type === 'file') {
+        return [{ name: node.name, path: node.path }];
+      }
+      return (node.children || []).flatMap(child => collectFiles(child));
     };
 
-    const totalFiles = countFiles(fileTree);
+    const fileInfos = collectFiles(fileTree);
+    console.log('📁 收集到文件数:', fileInfos.length);
 
-    // 提取当前已有的分类
-    const existingCategories = Array.from(new Set(items.map(i => i.category).filter(Boolean))) as string[];
-
-    setOrganizeState(prev => ({
-      ...prev,
-      isOrganizing: true,
-      progress: { current: 0, total: totalFiles },
-      pendingResults: []
-    }));
-
-    const results: { file: FileNode; analysis: Partial<KnowledgeItem> }[] = [];
-    try {
-      await analyzeFileRecursive(fileTree, results, existingCategories);
-    } catch (err) {
-      console.error("Batch analysis failed:", err);
+    if (fileInfos.length === 0) {
+      alert('未找到可处理的文件');
+      return;
     }
 
-    setOrganizeState(prev => ({
-      ...prev,
-      pendingResults: results
-    }));
-  };
-
-  // 执行物理整理 (移动文件)
-  const executeOrganize = async () => {
-    if (!rootPath || !storage.ensureDir || !storage.moveFile) return;
-
-    try {
-      setIsAnalyzing(true);
-      const newItems: KnowledgeItem[] = [...items];
-
-      for (const item of organizeState.pendingResults) {
-        const category = item.analysis.category || "未分类";
-        const targetDir = `${rootPath}/${category}`;
-        const targetPath = `${targetDir}/${item.file.name}`;
-
-        // 1. 确保目录存在
-        await storage.ensureDir(targetDir);
-
-        // 2. 移动文件 (简单处理冲突：如果路径不同则移动)
-        if (item.file.path !== targetPath) {
-          await storage.moveFile(item.file.path, targetPath);
-        }
-
-        // 3. 更新/添加元数据
-        const fileExtension = item.file.name.split('.').pop() || "";
-        const knowledgeItem: KnowledgeItem = {
-          id: targetPath, // Electron 模式下使用路径作为 ID
-          fileName: item.file.name,
-          fileType: fileExtension,
-          summary: item.analysis.summary || "",
-          category: category,
-          tags: item.analysis.tags || [],
-          applicability: item.analysis.applicability || "通用",
-          addedAt: new Date().toISOString().split('T')[0],
-          filePath: targetPath
-        };
-
-        const existingIndex = newItems.findIndex(i => i.filePath === item.file.path || i.fileName === item.file.name);
-        if (existingIndex > -1) {
-          newItems[existingIndex] = knowledgeItem;
-        } else {
-          newItems.push(knowledgeItem);
-        }
-      }
-
-      setItems(newItems);
-
-      // 刷新树
-      if (storage.scanDirectory) {
-        const tree = await storage.scanDirectory();
-        setFileTree(tree);
-      }
-
-      setOrganizeState(prev => ({ ...prev, isOrganizing: false, pendingResults: [] }));
-      alert("整理完成！文件已根据 AI 分类重新归位。");
-    } catch (error: any) {
-      alert(`整理失败: ${error.message}`);
-    } finally {
-      setIsAnalyzing(false);
+    // 🔧 新增：让用户选择分析模式（两步提示）
+    const continueAnalysis = confirm(`发现 ${fileInfos.length} 个文件，是否开始智能整理？`);
+    if (!continueAnalysis) {
+      return; // 用户取消
     }
+
+    // 第二步：选择分析模式
+    const analyzeAll = confirm(
+      `请选择分析模式：\n\n` +
+      `【确定】→ 全部文件重新分析\n` +
+      `【取消】→ 仅分析未分析的文件（跳过已有 AI 结果的）\n\n` +
+      `提示：如果只是新增了文件，选择"取消"可节省时间和 API 调用`
+    );
+
+    console.log('📋 [AutoOrganize] User chose:', analyzeAll ? '全部重新分析' : '仅分析未分析文件');
+
+    // 加载已保存的元数据，检查哪些文件已分析
+    const savedMetadata = await storage.loadAllItems();
+    const analyzedFiles = new Set<string>();
+
+    console.log('📊 [AutoOrganize] Metadata loaded:', {
+      isArray: Array.isArray(savedMetadata),
+      length: Array.isArray(savedMetadata) ? savedMetadata.length : 0,
+      type: typeof savedMetadata
+    });
+
+    if (!analyzeAll) {
+      // loadAllItems() 返回的是数组格式
+      if (Array.isArray(savedMetadata)) {
+        console.log('📊 [AutoOrganize] 元数据数组，共', savedMetadata.length, '条');
+
+        // 打印第一条数据结构作为参考
+        if (savedMetadata.length > 0) {
+          console.log('📊 [AutoOrganize] 第一条数据示例:', JSON.stringify(savedMetadata[0], null, 2));
+        }
+
+        savedMetadata.forEach((item: any) => {
+          // 获取摘要 - 检查所有可能的字段
+          const summary = item.summary || item.摘要 || item.AI建议?.summary || item.ai?.summary || '';
+          const fileName = item.fileName || item.name || item.originalName || '';
+
+          console.log('📊 [AutoOrganize] 检查文件:', fileName, '摘要字段:', {
+            summary: item.summary?.substring(0, 50),
+            摘要: item.摘要?.substring(0, 50),
+            'AI建议.summary': item.AI建议?.summary?.substring(0, 50),
+            'ai.summary': item.ai?.summary?.substring(0, 50)
+          });
+
+          // 🔧 排除占位摘要，只有真正的 AI 分析才算已分析
+          const placeholderTexts = ['📌 新发现文件', '新发现文件', '待分析', '待 AI 分析', '文件路径：'];
+          const isPlaceholder = !summary || placeholderTexts.some(p => summary.includes(p));
+
+          if (!isPlaceholder && summary.length > 0) {
+            analyzedFiles.add(fileName);
+            console.log('✅ [AutoOrganize] 已分析:', fileName);
+          } else {
+            console.log('⏳ [AutoOrganize] 待分析:', fileName, '原因:', !summary ? '无摘要' : '占位摘要');
+          }
+        });
+      } else if (savedMetadata && typeof savedMetadata === 'object' && 'files' in savedMetadata) {
+        // v3.0 原始格式（备用）
+        Object.entries((savedMetadata as any).files).forEach(([key, file]: [string, any]) => {
+          const hasAIAnalysis =
+            file.AI建议?.summary ||
+            file.summary ||
+            file.ai?.summary ||
+            (file.tags && file.tags.length > 0);
+
+          if (hasAIAnalysis) {
+            const fileName = file.fileName || file.originalName || file.name;
+            if (fileName) {
+              analyzedFiles.add(fileName);
+              console.log('✅ [AutoOrganize] Found analyzed file:', fileName);
+            }
+          }
+        });
+      }
+      console.log('📋 已分析文件数:', analyzedFiles.size);
+      console.log('📋 已分析文件列表:', Array.from(analyzedFiles));
+    }
+
+    // 根据用户选择过滤文件
+    const filesToProcess = analyzeAll
+      ? fileInfos  // 全部分析
+      : fileInfos.filter(info => {
+        const isAnalyzed = analyzedFiles.has(info.name);
+        if (isAnalyzed) {
+          console.log('⏭️ [AutoOrganize] Skipping analyzed file:', info.name);
+        }
+        return !isAnalyzed;
+      }); // 仅分析未分析的
+
+    console.log('📁 待处理文件数:', filesToProcess.length);
+    console.log('📁 待处理文件:', filesToProcess.map(f => f.name));
+
+    if (filesToProcess.length === 0) {
+      alert('所有文件都已分析完成！');
+      return;
+    }
+
+    if (!analyzeAll && filesToProcess.length < fileInfos.length) {
+      const skippedCount = fileInfos.length - filesToProcess.length;
+      console.log(`⏭️ 跳过 ${skippedCount} 个已分析文件`);
+    }
+
+    // 创建类似 File 的对象（Electron 环境下 File 构造函数不可用）
+    const files = filesToProcess.map(info => {
+      console.log('📁 [AutoOrganize] Creating mock file:', { name: info.name, path: info.path });
+
+      // 创建一个 mock File 对象，包含必要的属性
+      // 🔧 修复：确保 path 属性可被访问（不会被类型转换隐藏）
+      const mockFile = {
+        name: info.name,
+        path: info.path,  // 完整的源文件路径
+        size: 0,
+        type: '',
+        lastModified: Date.now(),
+        // File 接口需要的方法（这里只是占位，实际处理文件时会通过 path 读取）
+        arrayBuffer: async () => new ArrayBuffer(0),
+        text: async () => '',
+        stream: () => new ReadableStream(),
+        slice: () => new Blob()
+      };
+
+      // 验证 path 属性
+      console.log('📁 [AutoOrganize] Mock file created:', {
+        name: mockFile.name,
+        path: mockFile.path,
+        hasPath: !!mockFile.path
+      });
+
+      return mockFile as unknown as File;
+    });
+
+    // 添加到 stagingStore
+    addFiles(files);
+
+    if (workflowStatus === 'idle') {
+      setWorkflowStatus('reviewing');
+    }
+
+    // 触发批处理
+    setTimeout(() => {
+      import('./services/batchProcessor').then(({ batchProcessor }) => {
+        const currentStore = useStagingStore.getState();
+        const pendingIds = currentStore.files
+          .filter(f => f.status === 'pending' && !f.contentHash)
+          .map(f => f.id);
+        batchProcessor.processFiles(pendingIds);
+      });
+    }, 100);
   };
+
+  // 旧的 executeOrganize 已由 ReviewDashboard 的 executeCommit 替代
 
   // 操作：下载文件
   const handleDownload = async (item: KnowledgeItem) => {
     try {
+      if (storage.isElectron && storage.showItemInFolder) {
+        // 在 Electron 中，item.id 通常存储了文件路径（或者我们应该优先使用 filePath）
+        const path = item.filePath || item.id;
+        await storage.showItemInFolder(path);
+        return;
+      }
+
       const fileBlob = await storage.getFile(item.id);
       if (fileBlob) {
         const url = URL.createObjectURL(fileBlob);
@@ -1120,7 +1093,7 @@ const App = () => {
       }
     } catch (e) {
       console.error(e);
-      alert("下载过程中发生错误");
+      alert("下载/定位过程中发生错误");
     }
   };
 
@@ -1328,26 +1301,7 @@ const App = () => {
   };
 
   // 模拟数据加载
-  const loadDemoData = () => {
-    setIsAnalyzing(true);
-    setViewMode('mindmap');
-
-    setTimeout(() => {
-      const demoData: KnowledgeItem[] = [
-        { id: "1", fileName: "西门子S7-1200_PID调试指南.pdf", fileType: "pdf", summary: "S7-1200 PLC PID Compact指令参数整定与故障排除。", category: "自动化控制", tags: ["PLC", "PID", "调试", "Siemens"], applicability: "现场设备调试", addedAt: "2023-10-15" },
-        { id: "2", fileName: "生产线数据采集脚本_v2.py", fileType: "code", summary: "基于Modbus TCP的Python采集脚本，存入MySQL。", category: "编程脚本", tags: ["Python", "Modbus", "SQL", "后端"], applicability: "上位机开发", addedAt: "2023-11-02" },
-        { id: "3", fileName: "2024Q1_自动化部门复盘报告.pptx", fileType: "ppt", summary: "Q1项目进度、AGV调度系统难点复盘及Q2规划。", category: "项目管理", tags: ["复盘", "AGV", "规划", "PPT"], applicability: "季度汇报", addedAt: "2024-04-10" },
-        { id: "4", fileName: "Fanuc机器人故障代码表.xlsx", fileType: "excel", summary: "Fanuc R-2000iC系列机器人SRVO报警代码索引。", category: "设备维护", tags: ["Fanuc", "机器人", "运维", "故障表"], applicability: "产线抢修", addedAt: "2023-09-20" },
-        { id: "5", fileName: "电气原理图_V3.0.pdf", fileType: "pdf", summary: "总装车间电气柜接线图及IO分配表。", category: "自动化控制", tags: ["电气图", "EPLAN", "IO表"], applicability: "接线施工", addedAt: "2024-01-12" }
-      ];
-      setItems(prev => {
-        const existingIds = new Set(prev.map(i => i.id));
-        const newItems = demoData.filter(i => !existingIds.has(i.id));
-        return [...newItems, ...prev];
-      });
-      setIsAnalyzing(false);
-    }, 800);
-  };
+  // 演示数据功能已移除
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     setErrorMessage(null);
@@ -1361,52 +1315,163 @@ const App = () => {
     }
 
     if (e.target.files && e.target.files.length > 0) {
-      const file = e.target.files[0];
-      setIsAnalyzing(true);
+      const uploadedFiles: File[] = Array.from(e.target.files);
 
-      try {
-        let analysis: Partial<KnowledgeItem>;
-        const existingCategories = Array.from(new Set(items.map(i => i.category).filter(Boolean))) as string[];
+      // 🔧 修复：先将文件保存到磁盘，获取完整路径
+      const filesWithPath: File[] = [];
 
-        if (provider === 'deepseek') {
-          analysis = await analyzeContentWithDeepSeek(file, currentKey, deepSeekModel, undefined, undefined, existingCategories);
-        } else {
-          analysis = await analyzeContentWithGemini(file, currentKey, geminiModel, undefined, undefined, existingCategories);
+      for (const file of uploadedFiles) {
+        try {
+          if (storage.isElectron && storage.saveFile) {
+            // Electron 环境：保存文件到磁盘
+            const savedPath = await storage.saveFile(file);
+            console.log('📁 [Upload] File saved to:', savedPath);
+
+            // 创建带有 path 属性的 mock File 对象
+            const mockFile = {
+              name: file.name,
+              path: savedPath,  // 使用保存后的完整路径
+              size: file.size,
+              type: file.type,
+              lastModified: file.lastModified,
+              arrayBuffer: () => file.arrayBuffer(),
+              text: () => file.text(),
+              stream: () => file.stream(),
+              slice: (start?: number, end?: number) => file.slice(start, end)
+            } as unknown as File;
+
+            filesWithPath.push(mockFile);
+          } else {
+            // Web 环境：使用原始 File 对象
+            filesWithPath.push(file);
+          }
+        } catch (err) {
+          console.error('📁 [Upload] Failed to save file:', file.name, err);
+          setErrorMessage(`文件 ${file.name} 保存失败`);
+        }
+      }
+
+      if (filesWithPath.length > 0) {
+        addFiles(filesWithPath);
+
+        if (workflowStatus === 'idle') {
+          setWorkflowStatus('reviewing');
         }
 
-        // 生成唯一ID，并保存文件
-        // 1. 保存文件到 Storage Layer (Electron FS 或 IndexedDB)
-        const id = await storage.saveFile(file);
-
-        const fileExtension = file.name.split('.').pop();
-        const fileType = file.type || fileExtension || 'unknown';
-
-        const newItem: KnowledgeItem = {
-          id: id,
-          fileName: file.name,
-          fileType: fileType,
-          summary: analysis.summary || "未能生成摘要",
-          category: analysis.category || "未分类",
-          tags: analysis.tags || [],
-          applicability: analysis.applicability || "通用",
-          addedAt: new Date().toISOString().split('T')[0]
-        };
-        setItems(prev => [newItem, ...prev]);
-      } catch (error: any) {
-        setErrorMessage(error.message === "API_KEY_MISSING" ? "请先配置 API Key" : `分析失败：${error.message || "未知错误"}`);
-        if (error.message === "API_KEY_MISSING") setShowSettings(true);
-      } finally {
-        setIsAnalyzing(false);
-        e.target.value = '';
+        // 延迟触发批处理
+        setTimeout(() => {
+          import('./services/batchProcessor').then(({ batchProcessor }) => {
+            const currentStore = useStagingStore.getState();
+            const pendingIds = currentStore.files
+              .filter(f => f.status === 'pending' && !f.contentHash)
+              .map(f => f.id);
+            batchProcessor.processFiles(pendingIds);
+          });
+        }, 100);
       }
+
+      e.target.value = '';
     }
   };
 
-  const filteredItems = items.filter(item =>
-    item.fileName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    item.tags.some(tag => tag.toLowerCase().includes(searchQuery.toLowerCase())) ||
-    item.summary.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  // 🔧 修复问题 10：实现搜索权重排序（符合 PRD 3.1.1）
+  // 权重：文件名匹配 (1.0) > 标签匹配 (0.8) > 摘要匹配 (0.6)
+  const filteredItems = items
+    .map(item => {
+      const fileName = (item.fileName || item.name || '').toLowerCase();
+      const summary = (item.summary || '').toLowerCase();
+      const tags = item.tags || [];
+      const query = searchQuery.toLowerCase();
+
+      if (!query) return { item, score: 0, matched: true };
+
+      let score = 0;
+      let matched = false;
+
+      // 文件名匹配权重 1.0
+      if (fileName.includes(query)) {
+        score += 1.0;
+        matched = true;
+      }
+      // 标签匹配权重 0.8
+      if (tags.some((tag: string) => (tag || '').toLowerCase().includes(query))) {
+        score += 0.8;
+        matched = true;
+      }
+      // 摘要匹配权重 0.6
+      if (summary.includes(query)) {
+        score += 0.6;
+        matched = true;
+      }
+
+      return { item, score, matched };
+    })
+    .filter(({ matched }) => matched || !searchQuery)
+    .sort((a, b) => b.score - a.score)
+    .map(({ item }) => item);
+
+  // --- 全局拖拽处理 ---
+  // 🔧 修复问题 7：添加磁盘保存步骤
+  const handleGlobalDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const uploadedFiles = Array.from(e.dataTransfer.files);
+
+      // 🔧 与 handleFileUpload 保持一致：先保存到磁盘
+      const filesWithPath: File[] = [];
+
+      for (const file of uploadedFiles) {
+        try {
+          if (storage.isElectron && storage.saveFile) {
+            // Electron 环境：保存文件到磁盘
+            const savedPath = await storage.saveFile(file);
+            console.log('📁 [GlobalDrop] File saved to:', savedPath);
+
+            // 创建带有 path 属性的 mock File 对象
+            const mockFile = {
+              name: file.name,
+              path: savedPath,  // 使用保存后的完整路径
+              size: file.size,
+              type: file.type,
+              lastModified: file.lastModified,
+              arrayBuffer: () => file.arrayBuffer(),
+              text: () => file.text(),
+              stream: () => file.stream(),
+              slice: (start?: number, end?: number) => file.slice(start, end)
+            } as unknown as File;
+
+            filesWithPath.push(mockFile);
+          } else {
+            // Web 环境：使用原始 File 对象
+            filesWithPath.push(file);
+          }
+        } catch (err) {
+          console.error('📁 [GlobalDrop] Failed to save file:', file.name, err);
+        }
+      }
+
+      if (filesWithPath.length > 0) {
+        addFiles(filesWithPath);
+
+        if (workflowStatus === 'idle') {
+          setWorkflowStatus('reviewing');
+        }
+
+        setTimeout(() => {
+          import('./services/batchProcessor').then(({ batchProcessor }) => {
+            const currentStore = useStagingStore.getState();
+            const pendingIds = currentStore.files
+              .filter(f => f.status === 'pending' && !f.contentHash)
+              .map(f => f.id);
+            batchProcessor.processFiles(pendingIds);
+          });
+        }, 100);
+      }
+    }
+  };
 
   // --- 画布事件处理 ---
   const handleCanvasMouseDown = (e: React.MouseEvent) => {
@@ -1468,7 +1533,7 @@ const App = () => {
   };
 
   // 使用 ref 手动绑定 wheel 事件以禁用 passive 模式，解决 preventDefault 报错问题
-  const canvasRef = useRef<HTMLDivElement>(null);
+
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -1718,6 +1783,7 @@ const App = () => {
         onClear={handleClearAll}
         handleOpenFolder={handleOpenFolder}
         rootPath={rootPath}
+        setShowTaxonomySettings={setShowTaxonomySettings}
       />
 
       <EditModal
@@ -1729,106 +1795,51 @@ const App = () => {
         placeholder={editState.type === 'edit-tag' ? "输入新名称，留空保存即为删除" : "请输入名称"}
       />
 
-      {/* 智能整理进度与结果模态框 */}
-      {organizeState.isOrganizing && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-md flex items-center justify-center z-[200] p-4">
-          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden animate-in zoom-in-95 duration-300 border border-slate-100">
-            <div className="bg-gradient-to-r from-indigo-600 to-blue-600 p-8 text-white">
-              <div className="flex items-center gap-4 mb-4">
-                <div className="p-3 bg-white/20 rounded-2xl backdrop-blur-sm">
-                  <Wand2 size={32} />
-                </div>
+      {/* 旧的智能整理模态框已移除，统一使用 ReviewDashboard */}
+
+      {/* 新手引导覆盖层 */}
+      {isOnboarding && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md z-[300] flex items-center justify-center p-6 animate-in fade-in duration-500">
+          <div className="bg-white rounded-[2rem] shadow-2xl max-w-lg w-full overflow-hidden border border-white/20">
+            <div className="bg-gradient-to-br from-blue-600 to-indigo-700 p-10 text-white relative overflow-hidden">
+              <div className="absolute top-0 right-0 w-32 h-32 bg-white/10 rounded-full -mr-16 -mt-16 blur-3xl"></div>
+              <BrainCircuit size={64} className="mb-6 opacity-90" />
+              <h2 className="text-3xl font-bold mb-3 tracking-tight">欢迎使用 AI 个人知识库</h2>
+              <p className="text-blue-100 text-lg leading-relaxed">
+                只需三步，即可将杂乱的文件夹变身为清晰的知识图谱。
+              </p>
+            </div>
+            <div className="p-10 space-y-8 bg-white">
+              <div className="flex gap-4">
+                <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center font-bold shrink-0">1</div>
                 <div>
-                  <h2 className="text-2xl font-bold">AI 智能自动整理</h2>
-                  <p className="text-indigo-100 opacity-90">正在扫描并分析您的本地文件夹...</p>
+                  <h4 className="font-bold text-slate-800">选择本地文件夹</h4>
+                  <p className="text-sm text-slate-500">点击页面底部的“选择文件夹”，连接您的本地硬盘。</p>
                 </div>
               </div>
-
-              {organizeState.pendingResults.length < organizeState.progress.total && (
-                <div className="mt-8">
-                  <div className="flex justify-between items-end mb-2">
-                    <span className="text-sm font-medium text-indigo-50">正在分析: 第 {organizeState.progress.current} / {organizeState.progress.total} 个文件</span>
-                    <span className="text-2xl font-bold">{Math.round((organizeState.progress.current / organizeState.progress.total) * 100)}%</span>
-                  </div>
-                  <div className="w-full bg-white/20 rounded-full h-3 overflow-hidden">
-                    <div
-                      className="bg-white h-full transition-all duration-300 ease-out"
-                      style={{ width: `${(organizeState.progress.current / organizeState.progress.total) * 100}%` }}
-                    ></div>
-                  </div>
+              <div className="flex gap-4">
+                <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center font-bold shrink-0">2</div>
+                <div>
+                  <h4 className="font-bold text-slate-800">配置 AI 助手</h4>
+                  <p className="text-sm text-slate-500">在设置中输入 Gemini 或 DeepSeek 的 API Key。</p>
                 </div>
-              )}
-            </div>
-
-            <div className="p-8">
-              {organizeState.pendingResults.length === 0 ? (
-                <div className="flex flex-col items-center py-12 text-slate-400">
-                  <Loader2 size={40} className="animate-spin mb-4 text-indigo-500" />
-                  <p>正在读取核心文件内容...</p>
+              </div>
+              <div className="flex gap-4">
+                <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center font-bold shrink-0">3</div>
+                <div>
+                  <h4 className="font-bold text-slate-800">一键开启智能整理</h4>
+                  <p className="text-sm text-slate-500">AI 将自动读取、总结、分类并物理移动文件。</p>
                 </div>
-              ) : (
-                <>
-                  <div className="flex justify-between items-center mb-6">
-                    <h3 className="font-bold text-slate-800 flex items-center gap-2">
-                      <Sparkles size={18} className="text-amber-500" />
-                      分析建议预览 ({organizeState.pendingResults.length} 个文件)
-                    </h3>
-                    {organizeState.pendingResults.length < organizeState.progress.total && (
-                      <span className="text-xs bg-amber-50 text-amber-600 px-3 py-1 rounded-full border border-amber-100 animate-pulse">
-                        正在处理剩余文件...
-                      </span>
-                    )}
-                  </div>
-
-                  <div className="max-h-80 overflow-y-auto mb-6 pr-2 custom-scrollbar">
-                    <div className="space-y-3">
-                      {organizeState.pendingResults.map((result, idx) => (
-                        <div key={idx} className="flex items-start gap-4 p-4 bg-slate-50 border border-slate-100 rounded-2xl hover:border-indigo-200 transition-colors">
-                          <div className="p-2 bg-white rounded-lg shadow-sm">
-                            {getFileIcon(result.file?.name?.split('.').pop() || "")}
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2 mb-1">
-                              <span className="font-bold text-slate-700 truncate block">{result.file?.name || "未知文件"}</span>
-                              <ArrowRight size={14} className="text-slate-300 shrink-0" />
-                              <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${result.analysis?.summary === "分析失败" ? "bg-red-100 text-red-700" : "bg-indigo-100 text-indigo-700"}`}>
-                                {result.analysis?.category || "未分类"}
-                              </span>
-                            </div>
-                            <p className={`text-xs italic line-clamp-1 ${result.analysis?.summary === "分析失败" ? "text-red-400" : "text-slate-500"}`}>
-                              {result.analysis?.summary || "无摘要"}
-                              {result.analysis?.tags && result.analysis.tags.length > 0 && String(result.analysis.tags[0]).startsWith("错误:") && (
-                                <span className="ml-2 not-italic font-bold">({result.analysis.tags[0]})</span>
-                              )}
-                            </p>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="flex gap-4">
-                    <button
-                      onClick={() => setOrganizeState(prev => ({ ...prev, isOrganizing: false }))}
-                      className="flex-1 px-6 py-3.5 bg-slate-100 text-slate-600 font-bold rounded-2xl hover:bg-slate-200 transition-all border border-slate-200 active:scale-95"
-                    >
-                      取消
-                    </button>
-                    <button
-                      disabled={organizeState.pendingResults.length < organizeState.progress.total}
-                      onClick={executeOrganize}
-                      className="flex-1 px-6 py-3.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-2xl shadow-xl shadow-indigo-200 transition-all disabled:opacity-50 disabled:shadow-none active:scale-95 flex items-center justify-center gap-2"
-                    >
-                      <CheckCircle2 size={20} />
-                      立即物理移动并归类
-                    </button>
-                  </div>
-
-                  <p className="mt-4 text-[10px] text-slate-400 text-center italic">
-                    警告：此操作将真正在您的硬盘上创建文件夹并移动文件，无法撤销。
-                  </p>
-                </>
-              )}
+              </div>
+              <button
+                onClick={() => {
+                  setIsOnboarding(false);
+                  localStorage.setItem("onboarding_complete", "true");
+                }}
+                className="w-full py-4 bg-slate-900 text-white font-bold rounded-2xl hover:bg-slate-800 transition-all shadow-xl shadow-slate-200 active:scale-95"
+              >
+                我知道了，开始探索
+              </button>
             </div>
           </div>
         </div>
@@ -1845,16 +1856,120 @@ const App = () => {
             <h1 className="text-xl font-bold text-slate-800 tracking-tight md:hidden">知识助手</h1>
           </div>
           <div className="flex items-center gap-3">
-            {items.length === 0 && (
-              <button
-                onClick={loadDemoData}
-                disabled={isAnalyzing}
-                className="text-sm bg-blue-50 text-blue-600 hover:bg-blue-100 px-3 py-1.5 rounded-lg font-medium flex items-center gap-1.5 transition-colors border border-blue-100"
-              >
-                {isAnalyzing ? <Loader2 className="animate-spin" size={14} /> : <Database size={14} />}
-                <span className="hidden sm:inline">演示数据</span>
-              </button>
-            )}
+
+            {/* 🔧 优化：刷新按钮 - 保留已分析数据 */}
+            <button
+              onClick={async () => {
+                console.log('🔄 [Main] Manual refresh triggered');
+
+                // 如果没有选择文件夹，提示先选择
+                const currentRoot = localStorage.getItem('electron_root_path');
+                if (!currentRoot && storage.isElectron) {
+                  alert('请先选择一个文件夹');
+                  if (storage.openDirectory) {
+                    const path = await storage.openDirectory();
+                    if (path) {
+                      setRootPath(path);
+                    }
+                  }
+                  return;
+                }
+
+                // 1. 先加载已保存的元数据（包含 AI 分析结果）
+                const loadedItems = await storage.loadAllItems();
+                console.log(`🔄 [Main] Loaded ${loadedItems.length} saved items from metadata`);
+
+                if (storage.scanDirectory) {
+                  const tree = await storage.scanDirectory();
+                  setFileTree(tree);
+
+                  if (tree) {
+                    const root = localStorage.getItem('electron_root_path') || '';
+
+                    // 2. 收集当前文件系统中的所有文件
+                    const collectFilesFromTree = (node: FileNode): { name: string; path: string }[] => {
+                      if (node.type === 'file') {
+                        return [{ name: node.name, path: node.path }];
+                      }
+                      return (node.children || []).flatMap(child => collectFilesFromTree(child));
+                    };
+                    const scannedFiles = collectFilesFromTree(tree);
+                    const scannedPaths = new Set(scannedFiles.map(f => f.path));
+                    const scannedNames = new Set(scannedFiles.map(f => f.name));
+
+                    // 3. 🔧 合并策略：
+                    // - 已保存的文件：保留 AI 分析数据
+                    // - 新文件：创建临时条目（待分析）
+                    // - 已删除文件：从结果中移除
+                    const mergedItems: KnowledgeItem[] = [];
+
+                    // 3a. 保留仍然存在的已分析文件
+                    for (const savedItem of loadedItems) {
+                      // 🔧 修复：通过文件名找到实际路径
+                      const actualFile = scannedFiles.find(f => f.name === savedItem.fileName);
+
+                      if (actualFile) {
+                        // 更新为实际路径
+                        mergedItems.push({
+                          ...savedItem,
+                          filePath: actualFile.path
+                        });
+                      } else {
+                        console.log(`🔄 [Main] File removed from disk: ${savedItem.fileName}`);
+                      }
+                    }
+
+                    // 3b. 添加新发现的文件（未在已保存数据中）
+                    const savedPaths = new Set(loadedItems.map((i: any) => i.filePath));
+                    const savedNames = new Set(loadedItems.map((i: any) => i.fileName));
+
+                    for (const scannedFile of scannedFiles) {
+                      const isNew = !savedPaths.has(scannedFile.path) && !savedNames.has(scannedFile.name);
+
+                      if (isNew) {
+                        // 计算相对路径作为分类
+                        const relativePath = scannedFile.path.replace(root, '').replace(/^\//, '');
+                        const parts = relativePath.split('/');
+                        parts.pop(); // 移除文件名
+                        const category = parts.length > 0 ? parts.join('/') : '根目录';
+
+                        // 获取文件扩展名
+                        const ext = scannedFile.name.split('.').pop()?.toLowerCase() || '';
+                        let fileType = 'file';
+                        if (['pdf'].includes(ext)) fileType = 'pdf';
+                        else if (['ppt', 'pptx'].includes(ext)) fileType = 'ppt';
+                        else if (['xls', 'xlsx', 'csv'].includes(ext)) fileType = 'excel';
+                        else if (['py', 'js', 'ts', 'java', 'cpp'].includes(ext)) fileType = 'code';
+                        else if (['jpg', 'png', 'gif', 'webp'].includes(ext)) fileType = 'image';
+
+                        mergedItems.push({
+                          id: Math.random().toString(36).substring(7),
+                          fileName: scannedFile.name,
+                          fileType,
+                          category,
+                          summary: `📌 新发现文件，等待 AI 分析`,
+                          tags: ['新文件', ext.toUpperCase()],
+                          filePath: scannedFile.path,
+                          addedAt: new Date().toISOString().split('T')[0],
+                          applicability: '待 AI 分析'
+                        });
+                        console.log(`🔄 [Main] New file discovered: ${scannedFile.name}`);
+                      }
+                    }
+
+                    setItems(mergedItems);
+                    console.log(`🔄 [Main] Merged result: ${mergedItems.length} items (${loadedItems.length} saved + new files)`);
+                  }
+                } else {
+                  // 没有 scanDirectory 功能时直接加载已保存的 items
+                  setItems(loadedItems);
+                }
+              }}
+              className="w-9 h-9 rounded-full border bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100 p-1.5 transition-all"
+              title="刷新数据（同步文件系统变更）"
+            >
+              <RefreshCw className="w-full h-full" />
+            </button>
 
             <button
               onClick={() => setShowSettings(true)}
@@ -1875,289 +1990,369 @@ const App = () => {
       </header>
 
       {/* 主要内容区 */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 py-8">
+      {workflowStatus !== 'idle' ? (
+        <ReviewDashboard />
+      ) : (
+        <main
+          className="flex-1 max-w-7xl w-full mx-auto px-4 py-8"
+          onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+          onDragLeave={(e) => { e.preventDefault(); setIsDragging(false); }}
+          onDrop={handleGlobalDrop}
+        >
 
-        {/* 全局错误提示 */}
-        {errorMessage && (
-          <div className="mb-6 bg-red-50 border border-red-100 text-red-600 px-4 py-3 rounded-xl flex items-center gap-2 text-sm animate-in fade-in slide-in-from-top-2">
-            <AlertCircle size={16} />
-            {errorMessage}
-            {!apiKey && provider === 'gemini' && <button onClick={() => setShowSettings(true)} className="underline font-semibold hover:text-red-800 ml-1">去配置</button>}
-            {!deepSeekApiKey && provider === 'deepseek' && <button onClick={() => setShowSettings(true)} className="underline font-semibold hover:text-red-800 ml-1">去配置</button>}
-            <button onClick={() => setErrorMessage(null)} className="ml-auto text-red-400 hover:text-red-600"><X size={16} /></button>
-          </div>
-        )}
-
-        {/* 控制栏 */}
-        <div className="flex flex-col md:flex-row gap-4 mb-8 items-end md:items-center justify-between">
-          {/* 搜索 */}
-          <div className="relative w-full md:w-96 group">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-blue-500 transition-colors" size={18} />
-            <input
-              type="text"
-              placeholder="搜索知识点、标签或文件名..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-10 pr-4 py-2.5 bg-white border border-slate-200 rounded-xl shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all hover:border-slate-300"
-            />
-          </div>
-
-          <div className="flex items-center gap-3 w-full md:w-auto">
-            {/* 视图切换 */}
-            <div className="flex p-1.5 bg-slate-200/60 rounded-xl backdrop-blur-sm">
-              <button onClick={() => setViewMode('grid')} className={`p-2 rounded-lg transition-all ${viewMode === 'grid' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'}`} title="卡片视图"><LayoutGrid size={18} /></button>
-              <button onClick={() => setViewMode('list')} className={`p-2 rounded-lg transition-all ${viewMode === 'list' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'}`} title="列表视图"><List size={18} /></button>
-              <button onClick={() => setViewMode('mindmap')} className={`p-2 rounded-lg transition-all ${viewMode === 'mindmap' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'}`} title="脑图模式"><Network size={18} /></button>
+          {/* 全局错误提示 */}
+          {errorMessage && (
+            <div className="mb-6 bg-red-50 border border-red-100 text-red-600 px-4 py-3 rounded-xl flex items-center gap-2 text-sm animate-in fade-in slide-in-from-top-2">
+              <AlertCircle size={16} />
+              {errorMessage}
+              {!apiKey && provider === 'gemini' && <button onClick={() => setShowSettings(true)} className="underline font-semibold hover:text-red-800 ml-1">去配置</button>}
+              {!deepSeekApiKey && provider === 'deepseek' && <button onClick={() => setShowSettings(true)} className="underline font-semibold hover:text-red-800 ml-1">去配置</button>}
+              <button onClick={() => setErrorMessage(null)} className="ml-auto text-red-400 hover:text-red-600"><X size={16} /></button>
             </div>
+          )}
 
-            {/* 智能整理按钮 (仅 Electron) */}
-            {storage.isElectron && (
+          {/* 🔧 待处理文件进度面板 */}
+          {workflowStatus === 'idle' && stagingFiles.length > 0 && (
+            <div className="mb-6 bg-blue-50 border border-blue-200 px-4 py-3 rounded-xl flex items-center gap-3 text-sm shadow-sm">
+              <div className="flex-1">
+                <div className="flex items-center gap-2 text-blue-900 font-semibold mb-1">
+                  <span className="text-lg">📋</span>
+                  <span>有 {stagingFiles.length} 个文件待处理</span>
+                </div>
+                <div className="text-blue-700 text-xs flex gap-4">
+                  <span>✅ 已就绪: {stagingFiles.filter(f => f.status === 'success').length}</span>
+                  <span>⏳ 分析中: {stagingFiles.filter(f => f.status === 'analyzing').length}</span>
+                  <span>⚠️ 待处理: {stagingFiles.filter(f => f.status === 'pending').length}</span>
+                </div>
+              </div>
               <button
-                onClick={handleStartAutoOrganize}
-                disabled={organizeState.isOrganizing || isAnalyzing}
-                className="flex items-center justify-center gap-2 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl shadow-lg hover:shadow-indigo-200 transition-all cursor-pointer active:scale-95 hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                onClick={() => setWorkflowStatus('reviewing')}
+                className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-semibold transition-colors"
               >
-                <Wand2 size={18} className={organizeState.isOrganizing ? 'animate-pulse' : ''} />
-                <span className="font-medium">智能一键整理</span>
+                返回人机协作
               </button>
-            )}
-
-            {/* 上传按钮 */}
-            <label className={`flex-1 md:flex-none flex items-center justify-center gap-2 px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl shadow-lg hover:shadow-slate-300 transition-all cursor-pointer active:scale-95 hover:-translate-y-0.5 ${!apiKey ? 'opacity-80' : ''}`}>
-              <UploadCloud size={18} />
-              <span className="font-medium">上传</span>
-              <input type="file" className="hidden" onChange={handleFileUpload} disabled={isAnalyzing} />
-            </label>
-          </div>
-        </div>
-
-        {/* 内容展示区 */}
-
-        {/* 空状态 */}
-        {items.length === 0 && !isAnalyzing && (
-          <div className="py-24 flex flex-col items-center justify-center text-center border-2 border-dashed border-slate-200 rounded-3xl bg-slate-50/50 hover:bg-slate-50 transition-colors">
-            <div className="w-24 h-24 bg-white rounded-full flex items-center justify-center mb-6 shadow-sm border border-slate-100">
-              <BrainCircuit className="text-blue-500" size={40} />
             </div>
-            <h3 className="text-2xl font-bold text-slate-800 mb-3">构建您的第二大脑</h3>
-            <p className="text-slate-500 max-w-md mb-8 leading-relaxed">
-              上传原本杂乱的 PPT、PDF 或 Excel。<br />
-              Gemini AI 将自动提取知识点，生成可视化的知识地图。
-            </p>
-            {!apiKey && provider === 'gemini' && (
-              <p className="text-amber-600 bg-amber-50 px-4 py-2 rounded-lg text-sm mb-6 flex items-center gap-2">
-                <AlertCircle size={16} /> 提示：开始前请先在右上角配置 Gemini API Key
-              </p>
-            )}
-            {!deepSeekApiKey && provider === 'deepseek' && (
-              <p className="text-amber-600 bg-amber-50 px-4 py-2 rounded-lg text-sm mb-6 flex items-center gap-2">
-                <AlertCircle size={16} /> 提示：开始前请先在右上角配置 DeepSeek API Key
-              </p>
-            )}
-            <button
-              onClick={loadDemoData}
-              className="px-6 py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-all font-medium shadow-blue-200 shadow-lg flex items-center gap-2 hover:-translate-y-0.5 active:translate-y-0"
-            >
-              <Database size={18} />
-              体验 "自动化技术" 知识库
-            </button>
-          </div>
-        )}
+          )}
 
-        {/* 加载中 */}
-        {isAnalyzing && (
-          <div className="py-24 flex flex-col items-center justify-center">
-            <div className="relative">
-              <div className="w-16 h-16 border-4 border-blue-100 border-t-blue-600 rounded-full animate-spin"></div>
-              <div className="absolute inset-0 flex items-center justify-center">
-                <BrainCircuit size={24} className="text-blue-600 animate-pulse" />
+          {/* 控制栏 */}
+          <div className="flex flex-col md:flex-row gap-4 mb-8 items-end md:items-center justify-between">
+            {/* 搜索 */}
+            <div className="relative w-full md:w-96 group">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-blue-500 transition-colors" size={18} />
+              <input
+                type="text"
+                placeholder="搜索知识点、标签或文件名..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full pl-10 pr-12 py-2.5 bg-white border border-slate-200 rounded-xl shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all hover:border-slate-300"
+              />
+              <button
+                onClick={() => setShowAdvancedSearch(true)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-slate-400 hover:text-blue-500 hover:bg-blue-50 rounded-lg transition-colors"
+                title="高级筛选"
+              >
+                <MoreHorizontal size={18} />
+              </button>
+            </div>
+
+            <div className="flex items-center gap-3 w-full md:w-auto">
+              {/* 视图切换 */}
+              <div className="flex p-1.5 bg-slate-200/60 rounded-xl backdrop-blur-sm">
+                <button onClick={() => setViewMode('grid')} className={`p-2 rounded-lg transition-all ${viewMode === 'grid' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'}`} title="卡片视图"><LayoutGrid size={18} /></button>
+                <button onClick={() => setViewMode('list')} className={`p-2 rounded-lg transition-all ${viewMode === 'list' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'}`} title="列表视图"><List size={18} /></button>
+                <button onClick={() => setViewMode('mindmap')} className={`p-2 rounded-lg transition-all ${viewMode === 'mindmap' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'}`} title="脑图模式"><Network size={18} /></button>
+              </div>
+
+              {/* 智能整理按钮 (仅 Electron) */}
+              {storage.isElectron && (
+                <button
+                  onClick={handleStartAutoOrganize}
+                  disabled={organizeState.isOrganizing || isAnalyzing}
+                  className="flex items-center justify-center gap-2 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl shadow-lg hover:shadow-indigo-200 transition-all cursor-pointer active:scale-95 hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Wand2 size={18} className={organizeState.isOrganizing ? 'animate-pulse' : ''} />
+                  <span className="font-medium">智能一键整理</span>
+                </button>
+              )}
+
+              {/* 上传按钮 */}
+              <label className={`flex-1 md:flex-none flex items-center justify-center gap-2 px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl shadow-lg hover:shadow-slate-300 transition-all cursor-pointer active:scale-95 hover:-translate-y-0.5 ${!apiKey ? 'opacity-80' : ''}`}>
+                <UploadCloud size={18} />
+                <span className="font-medium">上传</span>
+                <input type="file" className="hidden" onChange={handleFileUpload} disabled={isAnalyzing} />
+              </label>
+            </div>
+          </div>
+
+          {/* 内容展示区 */}
+
+          {/* 🔧 修改：当没有 items 时显示空状态 */}
+          {items.length === 0 && !isAnalyzing && (
+            <div className="py-8">
+              {/* 空状态引导 */}
+              <div className="py-16 flex flex-col items-center justify-center text-center border-2 border-dashed border-slate-200 rounded-3xl bg-slate-50/50 hover:bg-slate-50 transition-colors">
+                <div className="w-24 h-24 bg-white rounded-full flex items-center justify-center mb-6 shadow-sm border border-slate-100">
+                  <BrainCircuit className="text-blue-500" size={40} />
+                </div>
+                <h3 className="text-2xl font-bold text-slate-800 mb-3">构建您的第二大脑</h3>
+                <p className="text-slate-500 max-w-md mb-8 leading-relaxed">
+                  点击刷新按钮扫描文件夹，或上传文件。<br />
+                  AI 将自动提取知识点，生成可视化的知识地图。
+                </p>
+                {!apiKey && provider === 'gemini' && (
+                  <p className="text-amber-600 bg-amber-50 px-4 py-2 rounded-lg text-sm mb-6 flex items-center gap-2">
+                    <AlertCircle size={16} /> 提示：开始前请先在右上角配置 Gemini API Key
+                  </p>
+                )}
+                {!deepSeekApiKey && provider === 'deepseek' && (
+                  <p className="text-amber-600 bg-amber-50 px-4 py-2 rounded-lg text-sm mb-6 flex items-center gap-2">
+                    <AlertCircle size={16} /> 提示：开始前请先在右上角配置 DeepSeek API Key
+                  </p>
+                )}
               </div>
             </div>
-            <p className="mt-6 text-lg font-medium text-slate-800">Gemini 正在构建神经连接...</p>
-            <p className="text-slate-500">正在分析文件内容并生成知识拓扑</p>
-          </div>
-        )}
+          )}
 
-        {/* 1. 脑图视图 */}
-        {!isAnalyzing && viewMode === 'mindmap' && items.length > 0 && renderMindMap()}
-
-        {/* 2. 卡片视图 (Grid) */}
-        {!isAnalyzing && viewMode === 'grid' && items.length > 0 && (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-            {filteredItems.map(item => (
-              <div key={item.id} className="relative bg-white rounded-xl border border-slate-200 p-5 hover:shadow-lg hover:border-blue-200 hover:-translate-y-1 transition-all flex flex-col h-full group duration-300">
-                {/* 删除按钮 */}
-                <button
-                  onClick={(e) => handleDeleteItem(item.id, e)}
-                  className="absolute top-3 right-3 p-1.5 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-full transition-colors opacity-0 group-hover:opacity-100"
-                  title="删除"
-                >
-                  <Trash2 size={16} />
-                </button>
-
-                <div className="flex justify-between items-start mb-4 pr-6">
-                  <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-xl shadow-sm border border-slate-50
-                    ${item.fileType.includes('pdf') ? 'bg-red-50 text-red-500' :
-                      item.fileType.includes('ppt') ? 'bg-orange-50 text-orange-500' :
-                        item.fileType.includes('code') ? 'bg-blue-50 text-blue-500' :
-                          'bg-emerald-50 text-emerald-600'
-                    }
-                  `}>
-                    {getFileIcon(item.fileType)}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={(e) => handleEditCategory(item.id, item.category, e)}
-                    className="px-2.5 py-1 bg-slate-100 text-slate-600 text-[11px] rounded-full font-semibold uppercase tracking-wide cursor-pointer hover:bg-blue-100 hover:text-blue-600 transition-colors flex items-center gap-1 group/cat border border-transparent hover:border-blue-200 relative z-10"
-                    title="点击修改分类"
-                  >
-                    <span className="truncate max-w-[80px]">{item.category}</span>
-                    <Edit2 size={10} className="opacity-100 md:opacity-0 group-hover/cat:opacity-100" />
-                  </button>
+          {/* 加载中 */}
+          {isAnalyzing && (
+            <div className="py-24 flex flex-col items-center justify-center">
+              <div className="relative">
+                <div className="w-16 h-16 border-4 border-blue-100 border-t-blue-600 rounded-full animate-spin"></div>
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <BrainCircuit size={24} className="text-blue-600 animate-pulse" />
                 </div>
+              </div>
+              <p className="mt-6 text-lg font-medium text-slate-800">Gemini 正在构建神经连接...</p>
+              <p className="text-slate-500">正在分析文件内容并生成知识拓扑</p>
+            </div>
+          )}
 
-                <h3
-                  className="font-bold text-slate-800 mb-2 line-clamp-1 group-hover:text-blue-600 transition-colors cursor-pointer"
-                  title="点击下载源文件"
-                  onClick={() => handleDownload(item)}
-                >
-                  {item.fileName}
-                </h3>
+          {/* 1. 脑图视图 */}
+          {!isAnalyzing && viewMode === 'mindmap' && items.length > 0 && renderMindMap()}
 
-                <p className="text-sm text-slate-500 mb-4 line-clamp-3 flex-1 leading-relaxed">
-                  {item.summary}
-                </p>
+          {/* 2. 卡片视图 (Grid) */}
+          {!isAnalyzing && viewMode === 'grid' && items.length > 0 && (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+              {filteredItems.map(item => (
+                <div key={item.id} className="relative bg-white rounded-xl border border-slate-200 p-5 hover:shadow-lg hover:border-blue-200 hover:-translate-y-1 transition-all flex flex-col h-full group duration-300">
+                  {/* 删除按钮 */}
+                  <button
+                    onClick={(e) => handleDeleteItem(item.id, e)}
+                    className="absolute top-3 right-3 p-1.5 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-full transition-colors opacity-0 group-hover:opacity-100"
+                    title="删除"
+                  >
+                    <Trash2 size={16} />
+                  </button>
 
-                <div className="space-y-3 pt-4 border-t border-slate-100 mt-auto">
-                  <div className="flex items-start gap-2">
-                    <CheckCircle2 size={14} className="text-emerald-500 mt-0.5 shrink-0" />
-                    <span className="text-xs text-slate-600 font-medium">{item.applicability}</span>
-                  </div>
-                  <div className="flex flex-wrap gap-1.5 items-center">
-                    {item.tags.map(tag => (
-                      <button
-                        type="button"
-                        key={tag}
-                        onClick={(e) => handleEditTag(item.id, tag, e)}
-                        className="text-[10px] px-2 py-0.5 bg-blue-50 text-blue-600 rounded-md border border-blue-100 font-medium hover:bg-blue-100 hover:border-blue-200 transition-colors cursor-pointer"
-                        title="点击修改或删除"
-                      >
-                        #{tag}
-                      </button>
-                    ))}
+                  <div className="flex justify-between items-start mb-4 pr-6">
+                    <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-xl shadow-sm border border-slate-50
+                    ${(item.fileType || '').includes('pdf') ? 'bg-red-50 text-red-500' :
+                        (item.fileType || '').includes('ppt') ? 'bg-orange-50 text-orange-500' :
+                          (item.fileType || '').includes('code') ? 'bg-blue-50 text-blue-500' :
+                            'bg-emerald-50 text-emerald-600'
+                      }
+                  `}>
+                      {getFileIcon(item.fileType)}
+                    </div>
                     <button
                       type="button"
-                      onClick={(e) => handleAddTag(item.id, e)}
-                      className="text-[10px] w-5 h-5 flex items-center justify-center bg-slate-50 text-slate-400 rounded-md border border-slate-200 hover:bg-blue-50 hover:text-blue-500 hover:border-blue-200 transition-colors"
-                      title="添加新标签"
+                      onClick={(e) => handleEditCategory(item.id, item.category, e)}
+                      className="px-2.5 py-1 bg-slate-100 text-slate-600 text-[11px] rounded-full font-semibold uppercase tracking-wide cursor-pointer hover:bg-blue-100 hover:text-blue-600 transition-colors flex items-center gap-1 group/cat border border-transparent hover:border-blue-200 relative z-10"
+                      title="点击修改分类"
                     >
-                      <Plus size={12} />
+                      <span className="truncate max-w-[80px]">{item.category}</span>
+                      <Edit2 size={10} className="opacity-100 md:opacity-0 group-hover/cat:opacity-100" />
                     </button>
+                  </div>
+
+                  <h3
+                    className="font-bold text-slate-800 mb-2 line-clamp-1 group-hover:text-blue-600 transition-colors cursor-pointer"
+                    title="点击下载源文件"
+                    onClick={() => handleDownload(item)}
+                  >
+                    {item.fileName}
+                  </h3>
+
+                  <p className="text-sm text-slate-500 mb-4 line-clamp-3 flex-1 leading-relaxed">
+                    {item.summary}
+                  </p>
+
+                  <div className="space-y-3 pt-4 border-t border-slate-100 mt-auto">
+                    <div className="flex items-start gap-2">
+                      <CheckCircle2 size={14} className="text-emerald-500 mt-0.5 shrink-0" />
+                      <span className="text-xs text-slate-600 font-medium">{item.applicability}</span>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5 items-center">
+                      {item.tags.map(tag => (
+                        <button
+                          type="button"
+                          key={tag}
+                          onClick={(e) => handleEditTag(item.id, tag, e)}
+                          className="text-[10px] px-2 py-0.5 bg-blue-50 text-blue-600 rounded-md border border-blue-100 font-medium hover:bg-blue-100 hover:border-blue-200 transition-colors cursor-pointer"
+                          title="点击修改或删除"
+                        >
+                          #{tag}
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        onClick={(e) => handleAddTag(item.id, e)}
+                        className="text-[10px] w-5 h-5 flex items-center justify-center bg-slate-50 text-slate-400 rounded-md border border-slate-200 hover:bg-blue-50 hover:text-blue-500 hover:border-blue-200 transition-colors"
+                        title="添加新标签"
+                      >
+                        <Plus size={12} />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* 3. 列表视图 (List) - 原有视图 */}
+          {!isAnalyzing && viewMode === 'list' && items.length > 0 && (
+            <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
+              <div className="overflow-x-auto">
+                <div className="min-w-[800px]"> {/* 确保最小宽度，防止挤压 */}
+                  <div className="grid grid-cols-12 gap-4 px-6 py-3 bg-slate-50 border-b border-slate-200 text-xs font-bold text-slate-400 uppercase tracking-wider">
+                    <div className="col-span-5">文件名称</div>
+                    <div className="col-span-2">知识分类</div>
+                    <div className="col-span-3">AI 分析状态</div>
+                    <div className="col-span-2">核心标签</div>
+                  </div>
+                  <div className="divide-y divide-slate-100">
+                    {filteredItems.map(item => (
+                      <div key={item.id} className="grid grid-cols-12 gap-4 px-6 py-4 items-center hover:bg-slate-50 transition-colors group relative">
+                        <div
+                          className="col-span-5 pr-2 flex items-center gap-3 cursor-pointer"
+                          onClick={() => handleDownload(item)}
+                          title="点击下载源文件"
+                        >
+                          <div className="p-2 bg-slate-100 rounded-lg text-slate-500 group-hover:bg-blue-50 group-hover:text-blue-500 transition-colors">
+                            {getFileIcon(item.fileType, "w-4 h-4")}
+                          </div>
+                          <div className="overflow-hidden">
+                            <div className="font-semibold text-slate-800 truncate group-hover:text-blue-600 transition-colors">{item.fileName}</div>
+                            <div className="text-xs text-slate-500 truncate mt-0.5">{item.summary}</div>
+                          </div>
+                        </div>
+
+                        {/* Electron: Open Folder Button in Settings or Header in Future. For now, add near File Upload if Root Path is missing */}
+                        {storage.isElectron && !rootPath && (
+                          <div className="col-span-12 mb-4 p-4 bg-yellow-50 border border-yellow-200 rounded-xl flex items-center justify-between">
+                            <div className="text-sm text-yellow-800">
+                              <strong>请先选择知识库文件夹</strong>
+                              <p>所有数据将保存到此文件夹中。</p>
+                            </div>
+                            <button
+                              onClick={handleOpenFolder}
+                              className="flex items-center gap-2 px-4 py-2 bg-yellow-100 text-yellow-800 rounded-lg hover:bg-yellow-200 transition-colors font-medium text-sm"
+                            >
+                              <FolderOpen size={16} /> 选择文件夹
+                            </button>
+                          </div>
+                        )}
+
+                        <div className="col-span-2 group/cat flex items-center relative z-10">
+                          <button
+                            type="button"
+                            onClick={(e) => handleEditCategory(item.id, item.category, e)}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-slate-100 text-slate-600 border border-slate-200 hover:bg-blue-100 hover:text-blue-600 hover:border-blue-200 transition-all cursor-pointer"
+                            title="点击修改分类"
+                          >
+                            <span className="truncate max-w-[100px]">{item.category}</span>
+                            <Edit2 size={12} className="shrink-0 opacity-100 md:opacity-0 group-hover/cat:opacity-100 text-slate-400 group-hover/cat:text-blue-500 transition-opacity" />
+                          </button>
+                        </div>
+                        <div className="col-span-3 text-xs font-medium flex items-center gap-1.5">
+                          {(item.summary && !item.summary.includes('📌 新发现文件') && !item.summary.includes('文件路径：')) ||
+                            (item.applicability && item.applicability !== '待 AI 分析' && item.applicability !== '待分析') ? (
+                            <>
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                              <span className="text-emerald-600">已分析</span>
+                            </>
+                          ) : (
+                            <>
+                              <span className="w-1.5 h-1.5 rounded-full bg-slate-300"></span>
+                              <span className="text-slate-500">待分析</span>
+                            </>
+                          )}
+                        </div>
+                        <div className="col-span-2 flex flex-wrap gap-1 items-center justify-between relative z-10">
+                          <div className="flex gap-1 flex-wrap items-center">
+                            {item.tags.map(tag => (
+                              <button
+                                type="button"
+                                key={tag}
+                                onClick={(e) => handleEditTag(item.id, tag, e)}
+                                className="text-[10px] bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded border border-blue-100 hover:bg-blue-100 hover:border-blue-200 transition-colors"
+                                title="点击修改"
+                              >
+                                #{tag}
+                              </button>
+                            ))}
+                            <button
+                              type="button"
+                              onClick={(e) => handleAddTag(item.id, e)}
+                              className="text-[10px] w-5 h-5 flex items-center justify-center bg-slate-50 text-slate-400 rounded border border-slate-200 hover:bg-blue-50 hover:text-blue-500 hover:border-blue-200 transition-colors"
+                              title="添加新标签"
+                            >
+                              <Plus size={10} />
+                            </button>
+                          </div>
+                          <button
+                            onClick={(e) => handleDeleteItem(item.id, e)}
+                            className="p-1.5 text-slate-300 hover:text-red-500 rounded hover:bg-red-50 transition-colors opacity-0 group-hover:opacity-100"
+                            title="删除"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
               </div>
-            ))}
-          </div>
-        )}
+            </div>
+          )}
 
-        {/* 3. 列表视图 (List) - 原有视图 */}
-        {!isAnalyzing && viewMode === 'list' && items.length > 0 && (
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
-            <div className="overflow-x-auto">
-              <div className="min-w-[800px]"> {/* 确保最小宽度，防止挤压 */}
-                <div className="grid grid-cols-12 gap-4 px-6 py-3 bg-slate-50 border-b border-slate-200 text-xs font-bold text-slate-400 uppercase tracking-wider">
-                  <div className="col-span-5">文件名称</div>
-                  <div className="col-span-2">知识分类</div>
-                  <div className="col-span-3">应用场景</div>
-                  <div className="col-span-2">核心标签</div>
-                </div>
-                <div className="divide-y divide-slate-100">
-                  {filteredItems.map(item => (
-                    <div key={item.id} className="grid grid-cols-12 gap-4 px-6 py-4 items-center hover:bg-slate-50 transition-colors group relative">
-                      <div
-                        className="col-span-5 pr-2 flex items-center gap-3 cursor-pointer"
-                        onClick={() => handleDownload(item)}
-                        title="点击下载源文件"
-                      >
-                        <div className="p-2 bg-slate-100 rounded-lg text-slate-500 group-hover:bg-blue-50 group-hover:text-blue-500 transition-colors">
-                          {getFileIcon(item.fileType, "w-4 h-4")}
-                        </div>
-                        <div className="overflow-hidden">
-                          <div className="font-semibold text-slate-800 truncate group-hover:text-blue-600 transition-colors">{item.fileName}</div>
-                          <div className="text-xs text-slate-500 truncate mt-0.5">{item.summary}</div>
-                        </div>
-                      </div>
+        </main>
+      )}
 
-                      {/* Electron: Open Folder Button in Settings or Header in Future. For now, add near File Upload if Root Path is missing */}
-                      {storage.isElectron && !rootPath && (
-                        <div className="col-span-12 mb-4 p-4 bg-yellow-50 border border-yellow-200 rounded-xl flex items-center justify-between">
-                          <div className="text-sm text-yellow-800">
-                            <strong>请先选择知识库文件夹</strong>
-                            <p>所有数据将保存到此文件夹中。</p>
-                          </div>
-                          <button
-                            onClick={handleOpenFolder}
-                            className="flex items-center gap-2 px-4 py-2 bg-yellow-100 text-yellow-800 rounded-lg hover:bg-yellow-200 transition-colors font-medium text-sm"
-                          >
-                            <FolderOpen size={16} /> 选择文件夹
-                          </button>
-                        </div>
-                      )}
-
-                      <div className="col-span-2 group/cat flex items-center relative z-10">
-                        <button
-                          type="button"
-                          onClick={(e) => handleEditCategory(item.id, item.category, e)}
-                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-slate-100 text-slate-600 border border-slate-200 hover:bg-blue-100 hover:text-blue-600 hover:border-blue-200 transition-all cursor-pointer"
-                          title="点击修改分类"
-                        >
-                          <span className="truncate max-w-[100px]">{item.category}</span>
-                          <Edit2 size={12} className="shrink-0 opacity-100 md:opacity-0 group-hover/cat:opacity-100 text-slate-400 group-hover/cat:text-blue-500 transition-opacity" />
-                        </button>
-                      </div>
-                      <div className="col-span-3 text-xs text-slate-600 font-medium flex items-center gap-1.5">
-                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
-                        {item.applicability}
-                      </div>
-                      <div className="col-span-2 flex flex-wrap gap-1 items-center justify-between relative z-10">
-                        <div className="flex gap-1 flex-wrap items-center">
-                          {item.tags.map(tag => (
-                            <button
-                              type="button"
-                              key={tag}
-                              onClick={(e) => handleEditTag(item.id, tag, e)}
-                              className="text-[10px] bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded border border-blue-100 hover:bg-blue-100 hover:border-blue-200 transition-colors"
-                              title="点击修改"
-                            >
-                              #{tag}
-                            </button>
-                          ))}
-                          <button
-                            type="button"
-                            onClick={(e) => handleAddTag(item.id, e)}
-                            className="text-[10px] w-5 h-5 flex items-center justify-center bg-slate-50 text-slate-400 rounded border border-slate-200 hover:bg-blue-50 hover:text-blue-500 hover:border-blue-200 transition-colors"
-                            title="添加新标签"
-                          >
-                            <Plus size={10} />
-                          </button>
-                        </div>
-                        <button
-                          onClick={(e) => handleDeleteItem(item.id, e)}
-                          className="p-1.5 text-slate-300 hover:text-red-500 rounded hover:bg-red-50 transition-colors opacity-0 group-hover:opacity-100"
-                          title="删除"
-                        >
-                          <Trash2 size={14} />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
+      {/* 高级搜索模态框 */}
+      {showAdvancedSearch && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[80vh] overflow-hidden">
+            <div className="flex items-center justify-between p-4 border-b">
+              <h3 className="text-lg font-bold">高级搜索</h3>
+              <button
+                onClick={() => setShowAdvancedSearch(false)}
+                className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <div className="h-[60vh]">
+              <SearchPanel
+                items={items}
+                onResultClick={(item) => {
+                  setShowAdvancedSearch(false);
+                  // 可以添加跳转到该文件的逻辑
+                }}
+              />
             </div>
           </div>
-        )}
+        </div>
+      )}
 
-      </main>
+      {/* 分类控制中心模态框 */}
+      {showTaxonomySettings && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] overflow-hidden">
+            <TaxonomySettingsPanel onClose={() => setShowTaxonomySettings(false)} />
+          </div>
+        </div>
+      )}
     </div>
   );
 };

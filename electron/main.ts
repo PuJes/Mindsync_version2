@@ -184,7 +184,6 @@ ipcMain.handle('fs:readTextFile', async (_event, filePath: string, maxChars: num
             const content = await fs.promises.readFile(filePath, 'utf-8');
             return { success: true, data: content.slice(0, maxChars), isText: true };
         } else {
-            // Return metadata for binary files
             return {
                 success: true,
                 data: `[Binary File] Name: ${path.basename(filePath)}, Size: ${stats.size} bytes, Extension: ${ext}`,
@@ -193,6 +192,53 @@ ipcMain.handle('fs:readTextFile', async (_event, filePath: string, maxChars: num
         }
     } catch (error: any) {
         console.error('Read Text File Error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+// 11. Compute File Hash (MD5) - Streamed
+import crypto from 'crypto';
+import { shell } from 'electron';
+
+ipcMain.handle('fs:computeHash', async (_event, filePath: string) => {
+    try {
+        return new Promise((resolve, reject) => {
+            const hash = crypto.createHash('md5');
+            const stream = fs.createReadStream(filePath);
+
+            stream.on('error', (err) => {
+                reject(err);
+            });
+
+            stream.on('data', (chunk) => {
+                hash.update(chunk);
+            });
+
+            stream.on('end', () => {
+                resolve({ success: true, data: hash.digest('hex') });
+            });
+        });
+    } catch (error: any) {
+        console.error('Compute Hash Error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+// 12. Shell Integration
+ipcMain.handle('shell:showItemInFolder', async (_event, filePath: string) => {
+    try {
+        shell.showItemInFolder(filePath);
+        return { success: true };
+    } catch (error: any) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('shell:openPath', async (_event, filePath: string) => {
+    try {
+        await shell.openPath(filePath);
+        return { success: true };
+    } catch (error: any) {
         return { success: false, error: error.message };
     }
 });
