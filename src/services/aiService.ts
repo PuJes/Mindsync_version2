@@ -119,7 +119,7 @@ export async function analyzeWithDeepSeek(
 export async function analyzeWithGemini(
     file: File,
     apiKey: string,
-    modelName: string = 'gemini-1.5-flash',
+    modelName: string = 'gemini-2.0-flash-exp',
     rawContent?: string,
     existingCategories: string[] = []
 ): Promise<AIAnalysisResult> {

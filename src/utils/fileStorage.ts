@@ -16,6 +16,7 @@ interface ElectronAPI {
     computeHash: (filePath: string) => Promise<{ success: boolean; data?: string; error?: string }>;
     showItemInFolder: (filePath: string) => Promise<{ success: boolean; error?: string }>;
     openPath: (filePath: string) => Promise<{ success: boolean; error?: string }>;
+    cleanupTempFiles: (dirPath: string, maxAgeHours?: number) => Promise<{ success: boolean; deletedCount?: number; error?: string }>;
 }
 
 declare global {
@@ -46,6 +47,7 @@ export interface StorageLayer {
     computeHash?: (filePath: string) => Promise<string>;
     showItemInFolder?: (filePath: string) => Promise<void>;
     openPath?: (filePath: string) => Promise<void>;
+    cleanupTempFiles?: (maxAgeHours?: number) => Promise<number>; // Returns deleted count
 }
 
 // --- IndexedDB Helper (Copied from index.tsx) ---
@@ -238,11 +240,11 @@ const ElectronStorage: StorageLayer = {
         if (!rootPath) throw new Error("请先选择知识库文件夹");
 
         try {
-            // 1. 确保 files 子目录存在
-            const filesDir = `${rootPath}/files`;
+            // 1. 确保 .mindsync_temp 子目录存在
+            const filesDir = `${rootPath}/.mindsync_temp`;
             const ensureResult = await window.electronAPI?.ensureDir(filesDir);
             if (!ensureResult?.success) {
-                throw new Error(ensureResult?.error || "无法创建文件存储目录");
+                throw new Error(ensureResult?.error || "无法创建临时存储目录");
             }
 
             // 2. 生成唯一文件名（时间戳 + 原文件名）
@@ -341,6 +343,22 @@ const ElectronStorage: StorageLayer = {
         if (!result?.success) {
             throw new Error(result?.error || "无法打开路径");
         }
+    },
+    cleanupTempFiles: async (maxAgeHours: number = 2) => {
+        if (!rootPath) {
+            initRootPath();
+        }
+        if (!rootPath) {
+            console.warn('📂 [Storage] cleanupTempFiles: rootPath is empty');
+            return 0;
+        }
+        const tempDir = `${rootPath}/.mindsync_temp`;
+        const result = await window.electronAPI?.cleanupTempFiles(tempDir, maxAgeHours);
+        if (result?.success) {
+            console.log(`🧹 [Storage] Cleaned up ${result.deletedCount} old temp files`);
+            return result.deletedCount || 0;
+        }
+        return 0;
     }
 };
 

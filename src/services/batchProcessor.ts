@@ -45,7 +45,7 @@ export class BatchProcessor {
             ? localStorage.getItem('gemini_api_key')
             : localStorage.getItem('deepseek_api_key');
         const model = provider === 'gemini'
-            ? localStorage.getItem('gemini_model') || 'gemini-1.5-flash'
+            ? localStorage.getItem('gemini_model') || 'gemini-2.0-flash-exp'
             : localStorage.getItem('deepseek_model') || 'deepseek-chat';
 
         if (!apiKey) return null;

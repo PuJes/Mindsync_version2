@@ -6,7 +6,7 @@ const DEFAULT_CONFIG: TaxonomyConfig = {
     mode: 'strict',
     maxDepth: 3,
     maxChildren: 10,
-    ignorePatterns: ['.DS_Store', 'node_modules', '*.tmp', '.git']
+    ignorePatterns: ['.DS_Store', 'node_modules', '*.tmp', '.git', '.mindsync_temp']
 };
 
 // 默认分类树

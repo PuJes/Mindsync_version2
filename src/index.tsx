@@ -245,7 +245,7 @@ async function analyzeContentWithDeepSeek(
 async function analyzeContentWithGemini(
   file: File,
   apiKey: string,
-  modelName: string = "gemini-1.5-flash",
+  modelName: string = "gemini-2.0-flash-exp",
   rawContent?: string,
   filePath?: string,
   existingCategories: string[] = []
@@ -563,10 +563,10 @@ const SettingsModal = ({
                     onChange={(e) => setGeminiModel(e.target.value)}
                     className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all appearance-none cursor-pointer"
                   >
+                    <option value="gemini-2.0-flash-exp">Gemini 2.0 Flash Exp (最新预览版 - 推荐)</option>
                     <option value="gemini-1.5-flash">Gemini 1.5 Flash (快速、低延迟)</option>
                     <option value="gemini-1.5-pro">Gemini 1.5 Pro (最强大、分析深)</option>
                     <option value="gemini-1.5-flash-8b">Gemini 1.5 Flash-8B (极速版本)</option>
-                    <option value="gemini-2.0-flash-exp">Gemini 2.0 Flash Exp (最新预览版)</option>
                   </select>
                 </div>
               </div>
@@ -718,10 +718,10 @@ const App = () => {
   // 设置相关状态
   const [showSettings, setShowSettings] = useState(false);
   const [showTaxonomySettings, setShowTaxonomySettings] = useState(false);
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem("gemini_api_key") || process.env.API_KEY || "");
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem("gemini_api_key") || "");
   const [deepSeekApiKey, setDeepSeekApiKey] = useState(() => localStorage.getItem("deepseek_api_key") || "");
   const [provider, setProvider] = useState<'gemini' | 'deepseek'>(() => (localStorage.getItem("ai_provider") as any) || 'gemini');
-  const [geminiModel, setGeminiModel] = useState(() => localStorage.getItem("gemini_model") || "gemini-1.5-flash");
+  const [geminiModel, setGeminiModel] = useState(() => localStorage.getItem("gemini_model") || "gemini-2.0-flash-exp");
   const [deepSeekModel, setDeepSeekModel] = useState(() => localStorage.getItem("deepseek_model") || "deepseek-chat");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -758,6 +758,18 @@ const App = () => {
       if (initialRootPath && storage.setRootPath) {
         storage.setRootPath(initialRootPath);
         setRootPath(initialRootPath);
+
+        // 🧹 清理超过2小时的临时文件
+        if (storage.cleanupTempFiles) {
+          try {
+            const deletedCount = await storage.cleanupTempFiles(2);
+            if (deletedCount > 0) {
+              console.log(`🧹 [Init] Cleaned up ${deletedCount} old temp files`);
+            }
+          } catch (e) {
+            console.warn('Failed to cleanup temp files:', e);
+          }
+        }
 
         // Scan directory if in Electron
         if (storage.scanDirectory) {

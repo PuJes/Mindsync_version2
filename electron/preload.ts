@@ -18,4 +18,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
     computeHash: (filePath: string) => ipcRenderer.invoke('fs:computeHash', filePath),
     showItemInFolder: (filePath: string) => ipcRenderer.invoke('shell:showItemInFolder', filePath),
     openPath: (filePath: string) => ipcRenderer.invoke('shell:openPath', filePath),
+    cleanupTempFiles: (dirPath: string, maxAgeHours?: number) => ipcRenderer.invoke('fs:cleanupTempFiles', dirPath, maxAgeHours),
 });

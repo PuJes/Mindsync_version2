@@ -242,3 +242,43 @@ ipcMain.handle('shell:openPath', async (_event, filePath: string) => {
         return { success: false, error: error.message };
     }
 });
+
+// 13. Clean up old temporary files
+ipcMain.handle('fs:cleanupTempFiles', async (_event, dirPath: string, maxAgeHours: number = 2) => {
+    try {
+        // Check if directory exists
+        try {
+            await fs.promises.access(dirPath);
+        } catch {
+            // Directory doesn't exist, nothing to clean
+            return { success: true, deletedCount: 0 };
+        }
+
+        const files = await fs.promises.readdir(dirPath);
+        const now = Date.now();
+        const maxAgeMs = maxAgeHours * 60 * 60 * 1000; // Convert hours to milliseconds
+        let deletedCount = 0;
+
+        for (const file of files) {
+            const filePath = path.join(dirPath, file);
+            try {
+                const stats = await fs.promises.stat(filePath);
+                const fileAge = now - stats.mtimeMs;
+
+                if (fileAge > maxAgeMs) {
+                    await fs.promises.unlink(filePath);
+                    deletedCount++;
+                    console.log(`🧹 [Cleanup] Deleted old temp file: ${file}`);
+                }
+            } catch (err) {
+                console.warn(`Failed to process file ${file}:`, err);
+            }
+        }
+
+        console.log(`🧹 [Cleanup] Cleaned up ${deletedCount} old files from ${dirPath}`);
+        return { success: true, deletedCount };
+    } catch (error: any) {
+        console.error('Cleanup Temp Files Error:', error);
+        return { success: false, error: error.message };
+    }
+});
