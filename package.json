@@ -1,6 +1,6 @@
 {
-  "name": "ai-knowledge-base",
-  "productName": "AI个人知识库",
+  "name": "mindsync",
+  "productName": "MindSync",
   "private": true,
   "version": "1.0.0",
   "description": "AI驱动的本地知识库管理工具",
@@ -41,7 +41,7 @@
   },
   "build": {
     "appId": "com.yourcompany.ai-knowledge-base",
-    "productName": "AI个人知识库",
+    "productName": "MindSync",
     "directories": {
       "output": "release"
     },

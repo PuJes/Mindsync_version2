@@ -1846,7 +1846,7 @@ const App = () => {
             <div className="bg-gradient-to-br from-blue-600 to-indigo-700 p-10 text-white relative overflow-hidden">
               <div className="absolute top-0 right-0 w-32 h-32 bg-white/10 rounded-full -mr-16 -mt-16 blur-3xl"></div>
               <BrainCircuit size={64} className="mb-6 opacity-90" />
-              <h2 className="text-3xl font-bold mb-3 tracking-tight">欢迎使用 AI 个人知识库</h2>
+              <h2 className="text-3xl font-bold mb-3 tracking-tight">欢迎使用 MindSync</h2>
               <p className="text-blue-100 text-lg leading-relaxed">
                 只需三步，即可将杂乱的文件夹变身为清晰的知识图谱。
               </p>
@@ -1894,8 +1894,8 @@ const App = () => {
             <div className="w-9 h-9 bg-gradient-to-br from-blue-600 to-indigo-600 rounded-xl flex items-center justify-center text-white shadow-blue-200 shadow-lg ring-1 ring-blue-700/10">
               <BrainCircuit size={20} />
             </div>
-            <h1 className="text-xl font-bold text-slate-800 tracking-tight hidden md:block">知识碎片索引助手</h1>
-            <h1 className="text-xl font-bold text-slate-800 tracking-tight md:hidden">知识助手</h1>
+            <h1 className="text-xl font-bold text-slate-800 tracking-tight hidden md:block">MindSync</h1>
+            <h1 className="text-xl font-bold text-slate-800 tracking-tight md:hidden">MindSync</h1>
           </div>
           <div className="flex items-center gap-3">
 

@@ -17,9 +17,9 @@ export default defineConfig(({ mode }) => {
         registerType: 'autoUpdate',
         includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'masked-icon.svg'],
         manifest: {
-          name: 'AI本地知识库',
-          short_name: 'AI知识库',
-          description: 'AI 驱动的个人本地知识库',
+          name: 'MindSync',
+          short_name: 'MindSync',
+          description: 'MindSync - AI 驱动的个人本地知识库',
           theme_color: '#ffffff',
           icons: [
             {
