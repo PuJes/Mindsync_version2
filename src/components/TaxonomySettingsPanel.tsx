@@ -91,6 +91,36 @@ export const TaxonomySettingsPanel: React.FC<TaxonomySettingsPanelProps> = ({ on
                     </div>
                 </div>
 
+                {/* 分类语言 */}
+                <div className="setting-section">
+                    <div className="section-title">
+                        <span>🌐 分类命名语言</span>
+                    </div>
+                    <div className="language-toggle">
+                        <button
+                            className={`lang-btn ${config.categoryLanguage === 'zh' ? 'active' : ''}`}
+                            onClick={() => handleConfigChange({ categoryLanguage: 'zh' })}
+                        >
+                            中文
+                        </button>
+                        <button
+                            className={`lang-btn ${config.categoryLanguage === 'en' ? 'active' : ''}`}
+                            onClick={() => handleConfigChange({ categoryLanguage: 'en' })}
+                        >
+                            English
+                        </button>
+                        <button
+                            className={`lang-btn ${(!config.categoryLanguage || config.categoryLanguage === 'auto') ? 'active' : ''}`}
+                            onClick={() => handleConfigChange({ categoryLanguage: 'auto' })}
+                        >
+                            自动
+                        </button>
+                    </div>
+                    <p className="setting-hint">
+                        指定 AI 生成分类名称使用的语言。"自动"会根据文件名语言自动选择。
+                    </p>
+                </div>
+
                 {/* 深度限制 */}
                 <div className="setting-section">
                     <div className="section-title">
@@ -108,7 +138,8 @@ export const TaxonomySettingsPanel: React.FC<TaxonomySettingsPanelProps> = ({ on
                         <span className="depth-value">{config.maxDepth} 级</span>
                     </div>
                     <p className="setting-hint">
-                        推荐 3 级：领域 → 项目 → 上下文
+                        限制分类路径的层数。例如 3 级 = “工作/项目/文档”。<br />
+                        层级越深分类越细，但也越难查找。推荐 2-3 级。
                     </p>
                 </div>
 
@@ -129,7 +160,105 @@ export const TaxonomySettingsPanel: React.FC<TaxonomySettingsPanelProps> = ({ on
                         <span>个</span>
                     </div>
                     <p className="setting-hint">
-                        限制每个目录下的子文件夹数量，防止过度膨胀
+                        限制每个文件夹下最多能创建几个子文件夹。<br />
+                        例如设为 10，则 /Work 下最多 10 个子目录，超出会合并到已有分类。
+                    </p>
+                </div>
+
+                {/* 目标分类数量 (新增) */}
+                {config.mode === 'flexible' && (
+                    <div className="setting-section">
+                        <div className="section-title">
+                            <span>🎯 目标分类数量</span>
+                        </div>
+                        <div className="target-count-control">
+                            <input
+                                type="number"
+                                min="3"
+                                max="30"
+                                placeholder="如: 8"
+                                value={config.targetCategoryCount || ''}
+                                onChange={(e) => handleConfigChange({
+                                    targetCategoryCount: e.target.value ? parseInt(e.target.value) : undefined
+                                })}
+                            />
+                            <span>个分类</span>
+                        </div>
+                        <p className="setting-hint">
+                            告诉 AI “我希望最终大概有 X 个分类”。<br />
+                            AI 会尽量把文件聚合到这个数量，而不是创建太多细碎的分类。
+                        </p>
+                    </div>
+                )}
+
+                {/* 强制深度分析 (新增) */}
+                <div className="setting-section">
+                    <div className="section-title">
+                        <span>🧠 强制深度分析</span>
+                    </div>
+                    <div className="mode-toggle">
+                        <label className="toggle-switch">
+                            <input
+                                type="checkbox"
+                                checked={config.forceDeepAnalysis || false}
+                                onChange={(e) => handleConfigChange({ forceDeepAnalysis: e.target.checked })}
+                            />
+                            <span className="slider round"></span>
+                        </label>
+                        <span className="toggle-label" style={{ marginLeft: '10px', fontSize: '14px' }}>
+                            {config.forceDeepAnalysis ? '已开启 (所有文件均深度读取内容)' : '已关闭 (简单文件快速分类)'}
+                        </span>
+                    </div>
+                    <p className="setting-hint">
+                        开启后，AI 将被强制读取每一个文件里的详细内容（Phase 2），不再仅凭文件名快速判断。<br />
+                        这会增加 API 消耗和处理时间，但分类准确性更高。
+                    </p>
+                </div>
+
+                {/* 分类词汇表 (新增) */}
+                <div className="setting-section">
+                    <div className="section-title">
+                        <span>📚 分类词汇表</span>
+                    </div>
+                    <div className="vocabulary-list">
+                        {(config.categoryVocabulary || []).map((vocab, i) => (
+                            <div key={i} className="pattern-tag">
+                                <code>{vocab}</code>
+                                <button onClick={() => {
+                                    const newVocab = (config.categoryVocabulary || []).filter(v => v !== vocab);
+                                    handleConfigChange({ categoryVocabulary: newVocab });
+                                }}>
+                                    <Trash2 size={12} />
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                    <div className="add-pattern">
+                        <input
+                            type="text"
+                            placeholder="添加分类名，如 Work/Projects"
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter' && (e.target as HTMLInputElement).value) {
+                                    const newVocab = [...(config.categoryVocabulary || []), (e.target as HTMLInputElement).value];
+                                    handleConfigChange({ categoryVocabulary: newVocab });
+                                    (e.target as HTMLInputElement).value = '';
+                                }
+                            }}
+                        />
+                        <button onClick={(e) => {
+                            const input = (e.currentTarget.previousSibling as HTMLInputElement);
+                            if (input.value) {
+                                const newVocab = [...(config.categoryVocabulary || []), input.value];
+                                handleConfigChange({ categoryVocabulary: newVocab });
+                                input.value = '';
+                            }
+                        }}>
+                            <Plus size={16} />
+                        </button>
+                    </div>
+                    <p className="setting-hint">
+                        预设你希望使用的分类名称。AI 会优先匹配这些名称。<br />
+                        例如添加 "工作/财务"，AI 遇到报销类文件会自动归入此分类。
                     </p>
                 </div>
 

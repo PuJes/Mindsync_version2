@@ -17,6 +17,8 @@ interface ElectronAPI {
     showItemInFolder: (filePath: string) => Promise<{ success: boolean; error?: string }>;
     openPath: (filePath: string) => Promise<{ success: boolean; error?: string }>;
     cleanupTempFiles: (dirPath: string, maxAgeHours?: number) => Promise<{ success: boolean; deletedCount?: number; error?: string }>;
+    isDirEmpty: (dirPath: string) => Promise<{ success: boolean; isEmpty?: boolean; fileCount?: number; error?: string }>;
+    deleteEmptyDir: (dirPath: string) => Promise<{ success: boolean; error?: string }>;
 }
 
 declare global {

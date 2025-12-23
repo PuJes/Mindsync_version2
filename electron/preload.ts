@@ -19,4 +19,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     showItemInFolder: (filePath: string) => ipcRenderer.invoke('shell:showItemInFolder', filePath),
     openPath: (filePath: string) => ipcRenderer.invoke('shell:openPath', filePath),
     cleanupTempFiles: (dirPath: string, maxAgeHours?: number) => ipcRenderer.invoke('fs:cleanupTempFiles', dirPath, maxAgeHours),
+    isDirEmpty: (dirPath: string) => ipcRenderer.invoke('fs:isDirEmpty', dirPath),
+    deleteEmptyDir: (dirPath: string) => ipcRenderer.invoke('fs:deleteEmptyDir', dirPath),
 });

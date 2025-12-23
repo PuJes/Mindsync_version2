@@ -2,8 +2,9 @@ import { useStagingStore, StagedFile } from '../store/stagingStore';
 import { calculateFileHash } from '../utils/fileHash';
 import { storage } from '../utils/fileStorage';
 import { FileMetadataV3 } from '../types/metadata.v3';
-import { analyzeFile, AIServiceConfig } from './aiService';
 import { taxonomyService } from './taxonomyService';
+import { analyzeManifest, analyzeWithSupplements, AIServiceConfig } from './aiService';
+import { ManifestItem } from '../types/metadata.v3';
 
 // 读取文件内容为文本（用于 AI 分析）
 async function readFileContent(file: File): Promise<string | undefined> {
@@ -17,12 +18,40 @@ async function readFileContent(file: File): Promise<string | undefined> {
         }
     }
 
-    // 回退到浏览器 FileReader
     return new Promise((resolve) => {
         const reader = new FileReader();
         reader.onload = () => resolve(reader.result as string);
         reader.onerror = () => resolve(undefined);
         reader.readAsText(file);
+    });
+}
+
+// 读取文件为 Base64 (用于 Vision / 图片分析)
+// 读取文件为 Base64 (用于 Vision / 图片分析)
+async function readFileAsBase64(file: File): Promise<string> {
+    // 1. Electron 环境下且有 path 属性 (Mock File from Smart Organize)
+    if (storage.isElectron && (file as any).path && window.electronAPI?.readBinary) {
+        try {
+            const result = await window.electronAPI.readBinary((file as any).path);
+            if (result.success && result.data) {
+                return result.data; // 直接返回 Base64
+            }
+        } catch (e) {
+            console.warn('Failed to read binary via Electron IPC', e);
+        }
+    }
+
+    // 2. Web 环境或 fallback
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+            const result = reader.result as string;
+            // Remove data:xxx;base64, prefix
+            const base64 = result.split(',')[1] || result;
+            resolve(base64);
+        };
+        reader.onerror = () => reject(new Error("Failed to read file as Base64"));
+        reader.readAsDataURL(file);
     });
 }
 
@@ -178,7 +207,10 @@ export class BatchProcessor {
         // 如果没有历史分类，严格模式下文件将被放在根目录，仅添加标签和摘要
         console.log('📋 [BatchProcessor] 最终历史分类列表:', existingCategories);
 
-        // 2. 处理每个文件
+        // 2. 预处理：计算 Hash & 准备 Manifest
+        const manifestItems: ManifestItem[] = [];
+        const filesToAnalyze: StagedFile[] = [];
+
         for (const file of filesToProcess) {
             if (file.status !== 'pending') continue;
 
@@ -189,11 +221,13 @@ export class BatchProcessor {
                 const hash = await calculateFileHash(file.file);
                 store.updateFileHash(file.id, hash);
 
-                // 查重
-                if (existingHashes.has(hash)) {
+                // 🔧 如果是重新分析，跳过重复检测
+                if (file.isReanalysis) {
+                    console.log(`🔄 [BatchProcessor] 跳过重复检测（重新分析模式）: ${file.file.name}`);
+                } else if (existingHashes.has(hash)) {
+                    // 查重（仅对新文件）
                     store.updateFileStatus(file.id, 'duplicate');
 
-                    // 🔧 修复问题 4：增强去重检测，区分完全重复和同内容不同名
                     // 查找已存在的同 hash 文件信息
                     const rawData = await storage.loadAllItems();
                     let existingFileName = '未知文件';
@@ -220,126 +254,262 @@ export class BatchProcessor {
                     continue;
                 }
 
-                // 非重复，触发 AI 分析
-                if (config) {
-                    const content = await readFileContent(file.file);
+                // 非重复，加入待分析列表
+                manifestItems.push({
+                    id: file.id,
+                    name: file.file.name,
+                    size: file.file.size,
+                    mimeType: file.file.type
+                });
+                filesToAnalyze.push(file);
 
-                    // 🔧 严格模式：必须从历史分类中选择；灵活模式：可创建新分类
-                    const taxonomyConfig = taxonomyService.getConfig();
-
-                    console.log('📋 [严格模式] ========== 开始分析 ==========');
-                    console.log('📋 [严格模式] 文件名:', file.file.name);
-                    console.log('📋 [严格模式] 当前模式:', taxonomyConfig.mode);
-                    console.log('📋 [严格模式] 历史分类列表:', existingCategories);
-                    console.log('📋 [严格模式] 历史分类数量:', existingCategories.length);
-
-                    const categoriesToPass = taxonomyConfig.mode === 'strict'
-                        ? existingCategories  // 严格模式：必须从已有分类中选择
-                        : [];  // 灵活模式：AI 可自由创建新分类
-
-                    console.log('📋 [严格模式] 传递给 AI 的分类列表:', categoriesToPass);
-
-                    const analysis = await analyzeFile(file.file, config, content, categoriesToPass);
-
-                    console.log('📋 [严格模式] AI 返回的原始分类:', analysis.category);
-
-                    // 根据严格/灵活模式处理分类
-                    let finalCategory = analysis.category || '未分类';
-
-                    // 🔧 优化：严格模式下无历史分类时，文件放根目录
-                    if (taxonomyConfig.mode === 'strict' && existingCategories.length === 0) {
-                        console.log('📋 [严格模式] 无历史分类，文件将放在根目录（不分类）');
-                        finalCategory = '';  // 空字符串表示根目录
-                    } else if (taxonomyConfig.mode === 'strict' && existingCategories.length > 0) {
-                        console.log('📋 [严格模式] ========== 开始后处理 ==========');
-
-                        // Level 1: 精确匹配
-                        if (existingCategories.includes(finalCategory)) {
-                            console.log('✅ [严格模式] Level 1 - 精确匹配成功');
-                            console.log('✅ [严格模式] 直接使用:', finalCategory);
-                        } else {
-                            console.log('❌ [严格模式] Level 1 - 精确匹配失败');
-                            console.log('❌ [严格模式] "' + finalCategory + '" 不在历史分类中');
-                            console.log('🔍 [严格模式] 进入 Level 2 - 模糊匹配...');
-
-                            // Level 2: 模糊匹配（相似度阈值 0.3）
-                            const bestMatch = taxonomyService.findBestMatch(finalCategory, 0.3);
-                            console.log('🔍 [严格模式] Level 2 结果:', {
-                                输入: finalCategory,
-                                最佳匹配: bestMatch.path,
-                                相似度: bestMatch.similarity,
-                                阈值: 0.3
-                            });
-
-                            if (bestMatch.similarity > 0) {
-                                console.log('✅ [严格模式] Level 2 - 模糊匹配成功');
-                                console.log('✅ [严格模式] 使用最相似的分类:', bestMatch.path);
-                                finalCategory = bestMatch.path;
-                            } else {
-                                console.log('❌ [严格模式] Level 2 - 模糊匹配失败（相似度不足）');
-                                console.log('⚠️ [严格模式] 进入 Level 3 - 强制回退...');
-
-                                // Level 3: 强制回退到第一个历史分类
-                                if (existingCategories.length > 0) {
-                                    console.log('⚠️ [严格模式] Level 3 - 强制使用第一个历史分类');
-                                    console.log('⚠️ [严格模式] 从 "' + finalCategory + '" 回退到 "' + existingCategories[0] + '"');
-                                    finalCategory = existingCategories[0];
-                                }
-                            }
-                        }
-
-                        console.log('📋 [严格模式] ========== 处理完成 ==========');
-                        console.log('📋 [严格模式] 最终分类:', finalCategory);
-                    } else if (taxonomyConfig.mode === 'flexible') {
-                        console.log('📋 [灵活模式] 应用深度限制 (maxDepth=' + taxonomyConfig.maxDepth + ')');
-
-                        // 灵活模式：应用深度限制
-                        const parts = finalCategory.split('/');
-                        if (parts.length > taxonomyConfig.maxDepth) {
-                            const truncated = parts.slice(0, taxonomyConfig.maxDepth).join('/');
-                            console.log('📋 [灵活模式] 深度超限，截断:', finalCategory, '→', truncated);
-                            finalCategory = truncated;
-                        } else {
-                            console.log('📋 [灵活模式] 深度正常，直接使用:', finalCategory);
-                        }
-                    }
-
-                    console.log('🎯 [最终结果]', {
-                        文件: file.file.name,
-                        模式: taxonomyConfig.mode,
-                        AI返回: analysis.category,
-                        最终分类: finalCategory,
-                        摘要预览: analysis.summary?.substring(0, 30) + '...',
-                        标签: analysis.tags
-                    });
-                    console.log(''); // 空行分隔
-
-                    store.updateFileProposal(file.id, {
-                        targetPath: finalCategory,
-                        summary: analysis.summary || '',
-                        tags: analysis.tags || [],
-                        reasoning: `${analysis.reasoning || 'AI 自动分析完成'}${taxonomyConfig.mode === 'strict' ? ' (严格模式)' : ' (灵活模式)'}`,
-                        confidence: analysis.confidence || 0.8
-                    });
-                } else {
-                    // 无 AI 配置，标记为待人工处理
-                    console.warn(`⚠️ [BatchProcessor] 未配置 AI API Key，文件 ${file.file.name} 需要手动分类`);
-                    store.updateFileProposal(file.id, {
-                        targetPath: '未分类',
-                        summary: '⚠️ 未配置 AI API Key！请在设置中配置 Gemini 或 DeepSeek API Key 后重新分析。',
-                        tags: ['需配置API'],
-                        reasoning: '未检测到 AI 服务配置，请点击右上角设置按钮配置 API Key',
-                        confidence: 0
-                    });
-                }
             } catch (error: any) {
                 console.error(`Error processing file ${file.file.name}:`, error);
                 store.updateFileStatus(file.id, 'error', error.message);
             }
         }
 
+        if (filesToAnalyze.length === 0) {
+            store.setWorkflowStatus('reviewing');
+            return;
+        }
+
+        // 3. Phase 1: 批量元数据分析 (Manifest Analysis)
+        if (config) {
+            try {
+                const taxonomyConfig = taxonomyService.getConfig();
+                // 严格模式传递分类，灵活模式传递空 (或也传递以供参考)
+                const categoriesToPass = existingCategories;
+
+                console.log('🚀 [BatchProcessor] Phase 1 - Sending Manifest:', manifestItems.length, 'files');
+                console.log('🚀 [BatchProcessor] Categories:', categoriesToPass);
+                console.log('🚀 [BatchProcessor] Taxonomy Config:', taxonomyConfig);
+
+                const protocolResponse = await analyzeManifest(manifestItems, config, categoriesToPass, taxonomyConfig);
+                console.log('🚀 [BatchProcessor] Phase 1 Result:', protocolResponse);
+
+                // 4. Phase 2: 处理每个文件的指令
+                let deepSeekVisionAlertShown = false; // Flag to prevent multiple alerts
+
+                for (const file of filesToAnalyze) {
+                    try {
+                        const instruction = protocolResponse.items[file.id];
+                        if (!instruction) {
+                            console.warn(`⚠️ No instruction for file ${file.id}`);
+                            continue;
+                        }
+
+                        let finalAnalysis: any = null;
+
+                        if (instruction.instruction === 'Direct') {
+                            console.log(`✅ [${file.file.name}] Phase 1 Direct Hit`);
+                            finalAnalysis = {
+                                category: instruction.category,
+                                summary: instruction.summary,
+                                tags: instruction.tags,
+                                reasoning: instruction.reasoning,
+                                confidence: instruction.confidence
+                            };
+                        } else if (instruction.instruction === 'Need_Info') {
+                            console.log(`🔍 [${file.file.name}] Phase 2 Need Info:`, instruction.requestType);
+
+                            // 获取补充内容
+                            let supplementContent = '';
+                            // 🔧 P0: 检查是否为 PDF (不依赖 requestType，自动检测)
+                            const isPdf = file.file.name.toLowerCase().endsWith('.pdf');
+
+                            if (instruction.requestType === 'image_vision' || isPdf) {
+                                // 图片或 PDF 都作为二进制 Base64 读取
+                                supplementContent = await readFileAsBase64(file.file);
+                            } else {
+                                // default to text preview (first 5KB)
+                                const fullText = await readFileContent(file.file);
+                                supplementContent = fullText ? fullText.substring(0, 8000) : '';
+                            }
+
+                            // 二次分析
+                            // 🔧 修复：如果无法读取文本内容（如视频、音频、无法解析的二进制），构造元数据描述替代
+                            // 注意：PDF 读取失败也会进入这里 (supplementContent 为空时)
+                            if (!supplementContent && instruction.requestType !== 'image_vision' && !isPdf) {
+                                console.log(`⚠️ [${file.file.name}] Content not readable, using metadata fallback.`);
+                                supplementContent = `[系统提示]: 该文件 (${file.file.type || '未知格式'}) 无法读取文本内容。请仅根据文件名 "${file.file.name}" 和文件类型进行分类。`;
+                            }
+
+                            if (supplementContent) {
+                                finalAnalysis = await analyzeWithSupplements(
+                                    file.file,
+                                    supplementContent,
+                                    // 如果是 PDF，传递 'pdf_document' 类型，否则透传原有类型
+                                    isPdf ? 'pdf_document' : (instruction.requestType || 'text_preview'),
+                                    config,
+                                    categoriesToPass,
+                                    taxonomyConfig
+                                );
+                            } else {
+                                // 只有图片读取失败（supplementContent仍为空）才会走到这里
+                                console.warn(`⚠️ [${file.file.name}] Failed to read content for Phase 2`);
+                                finalAnalysis = {
+                                    category: '/_Unclassified',
+                                    summary: '无法读取文件内容进行深入分析',
+                                    tags: ['读取失败'],
+                                    reasoning: 'Phase 2 Content Read Failed',
+                                    confidence: 0
+                                };
+                            }
+                        }
+
+                        // 应用分类规则（严格/灵活模式后处理）
+                        if (finalAnalysis) {
+                            this.applyAnalysisResult(file, finalAnalysis, store, existingCategories);
+                        }
+
+                    } catch (err: any) {
+                        console.error(`❌ [${file.file.name}] Analysis Failed:`, err);
+
+                        // 1. 通用模型不支持错误处理 (Vision, PDF, etc.)
+                        // 匹配关键字: "不支持", "not support"
+                        const errorMessage = err.message || '';
+                        if (errorMessage.includes('不支持') || errorMessage.toLowerCase().includes('not support')) {
+                            const isDeepSeek = errorMessage.toLowerCase().includes('deepseek');
+
+                            store.updateFileProposal(file.id, {
+                                targetPath: '未分类/Error',
+                                summary: `⚠️ 模型不支持此文件类型: ${errorMessage}`,
+                                tags: ['模型不支持', isDeepSeek ? 'DeepSeek' : 'Compat'],
+                                reasoning: `Model Capability Limit: ${errorMessage}`,
+                                confidence: 0
+                            });
+
+                            if (!deepSeekVisionAlertShown) {
+                                alert(`⚠️ 当前模型不支持某些文件分析\n\n原因: ${errorMessage}\n\n建议前往设置切换至 Gemini Pro Vision 或其他更强大的模型。`);
+                                deepSeekVisionAlertShown = true;
+                            }
+                        } else {
+                            // 2. 其他错误
+                            store.updateFileStatus(file.id, 'error', `Analysis Error: ${err.message}`);
+                        }
+                    }
+                }
+
+            } catch (e: any) {
+                console.error('❌ [BatchProcessor] Critical Batch Failure:', e);
+                // 仅针对未处理的文件进行 fallback
+                // ... (由于 loop 内已有 try-catch，这里主要是捕获 loop 外的 analyzeManifest 错误)
+
+                for (const file of filesToAnalyze) {
+                    store.updateFileStatus(file.id, 'error', `AI Analysis Failed: ${e.message}`);
+                }
+            }
+        } else {
+            // 无 API Key
+            for (const file of filesToAnalyze) {
+                store.updateFileProposal(file.id, {
+                    targetPath: '未分类',
+                    summary: '⚠️ 未配置 AI API Key',
+                    tags: ['需配置API'],
+                    reasoning: '未检测到 AI 服务配置',
+                    confidence: 0
+                });
+            }
+        }
+
         // 处理完成后，更新工作流状态
         store.setWorkflowStatus('reviewing');
+    }
+
+    /**
+     * 应用 AI 分析结果并执行分类规则（严格/灵活模式）
+     */
+    private applyAnalysisResult(file: StagedFile, analysis: any, store: any, existingCategories: string[]) {
+        const taxonomyConfig = taxonomyService.getConfig();
+        let finalCategory = analysis.category || '未分类';
+        const originalAISuggestion = finalCategory; // 保存原始建议用于纠正学习
+
+        console.log(`📋 [${file.file.name}] Applying Rules (${taxonomyConfig.mode}). Raw Category: ${finalCategory}`);
+
+        // 0. 检查用户纠正历史 - 如果有历史纠正，优先应用
+        const correction = taxonomyService.findApplicableCorrection(file.file.name);
+        if (correction) {
+            console.log(`🔄 [${file.file.name}] Applying learned correction: ${finalCategory} → ${correction.userChosen}`);
+            finalCategory = correction.userChosen;
+            // 跳过后续处理，直接使用用户历史选择
+            store.updateFileProposal(file.id, {
+                targetPath: finalCategory.replace(/^\/+/, '').replace(/\/+$/, ''),
+                summary: analysis.summary || '',
+                tags: analysis.tags || [],
+                reasoning: `📝 基于历史纠正自动应用 (原建议: ${originalAISuggestion})`,
+                confidence: 0.95
+            });
+            return;
+        }
+
+        // 1. 强制深度限制 (maxDepth) - 两种模式都适用
+        const parts = finalCategory.replace(/^\/+/, '').split('/').filter(Boolean);
+        if (parts.length > taxonomyConfig.maxDepth) {
+            const truncated = parts.slice(0, taxonomyConfig.maxDepth).join('/');
+            console.log(`✂️ [${file.file.name}] Depth limit (${taxonomyConfig.maxDepth}): ${finalCategory} → ${truncated}`);
+            finalCategory = truncated;
+        }
+
+        // 1.5 词汇表检查 - 如果不在词汇表中，尝试匹配最接近的
+        if (!taxonomyService.isInVocabulary(finalCategory)) {
+            const vocab = taxonomyConfig.categoryVocabulary || [];
+            if (vocab.length > 0) {
+                const bestVocabMatch = taxonomyService.findBestMatch(finalCategory, 0.2);
+                if (vocab.some(v => bestVocabMatch.path.includes(v) || v.includes(bestVocabMatch.path.split('/')[0]))) {
+                    console.log(`📚 [${file.file.name}] Vocabulary enforcement: ${finalCategory} → ${bestVocabMatch.path}`);
+                    finalCategory = bestVocabMatch.path;
+                }
+            }
+        }
+
+        // 2. 强制同级数量限制 (maxChildren) - 仅灵活模式需要检查
+        if (taxonomyConfig.mode === 'flexible' && parts.length > 0) {
+            const parentPath = parts.slice(0, -1).join('/') || ''; // 父路径
+            const siblingCategories = existingCategories.filter(cat => {
+                const catParts = cat.replace(/^\/+/, '').split('/').filter(Boolean);
+                const catParent = catParts.slice(0, -1).join('/');
+                return catParent === parentPath;
+            });
+
+            // 如果当前分类不在已有分类中，检查是否超出限制
+            if (!existingCategories.includes(finalCategory) && !existingCategories.includes('/' + finalCategory)) {
+                if (siblingCategories.length >= taxonomyConfig.maxChildren) {
+                    // 超出限制，强制归入最相似的已有分类
+                    const bestMatch = taxonomyService.findBestMatch(finalCategory, 0.2);
+                    console.log(`⚠️ [${file.file.name}] MaxChildren limit (${taxonomyConfig.maxChildren}): ${finalCategory} → ${bestMatch.path}`);
+                    finalCategory = bestMatch.path.replace(/^\/+/, '');
+                }
+            }
+        }
+
+        if (taxonomyConfig.mode === 'strict') {
+            // 严格模式逻辑
+            if (existingCategories.length === 0) {
+                finalCategory = ''; // Root
+            } else if (existingCategories.includes(finalCategory) || existingCategories.includes('/' + finalCategory)) {
+                // Exact match
+            } else {
+                // Fuzzy Match
+                const bestMatch = taxonomyService.findBestMatch(finalCategory, 0.3);
+                if (bestMatch.similarity > 0) {
+                    finalCategory = bestMatch.path;
+                } else {
+                    finalCategory = existingCategories[0] || '';
+                }
+            }
+        }
+
+        // Remove leading/trailing slashes for clean path
+        finalCategory = finalCategory.replace(/^\/+/, '').replace(/\/+$/, '');
+
+        store.updateFileProposal(file.id, {
+            targetPath: finalCategory,
+            summary: analysis.summary || '',
+            tags: analysis.tags || [],
+            reasoning: analysis.reasoning || 'AI Analysis',
+            confidence: analysis.confidence || 0.8
+        });
     }
 }
 

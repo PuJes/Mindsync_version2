@@ -8,6 +8,7 @@ export interface StagedFile {
     status: 'pending' | 'analyzing' | 'success' | 'error' | 'duplicate';
     originalPath: string; // 来源路径（如果是拖入的，可能是 file.path 或 undefined）
     contentHash?: string; // MD5 Hash
+    isReanalysis?: boolean; // 🔧 标记是否为重新分析，跳过重复检测
 
     // AI 建议
     proposal?: {
@@ -44,6 +45,7 @@ interface StagingState {
     // Actions
     setWorkflowStatus: (status: StagingState['workflowStatus']) => void;
     addFiles: (files: File[]) => void;
+    addFilesForReanalysis: (files: File[]) => void; // 🔧 重新分析专用，跳过重复检测
     updateFileStatus: (id: string, status: StagedFile['status'], error?: string) => void;
     updateFileHash: (id: string, hash: string) => void;
     updateFileProposal: (id: string, proposal: StagedFile['proposal']) => void;
@@ -85,6 +87,26 @@ export const useStagingStore = create<StagingState>((set, get) => ({
                 file: f,
                 status: 'pending' as const,
                 originalPath: filePath || f.name // Electron File object usually has path
+            };
+        });
+        return { files: [...state.files, ...stagedFiles] };
+    }),
+
+    // 🔧 重新分析专用：设置 isReanalysis 标记
+    addFilesForReanalysis: (newFiles) => set((state) => {
+        const stagedFiles: StagedFile[] = newFiles.map(f => {
+            const filePath = (f as any).path;
+            console.log('🔄 [StagingStore] addFilesForReanalysis:', {
+                name: f.name,
+                path: filePath,
+                isReanalysis: true
+            });
+            return {
+                id: Math.random().toString(36).substring(7),
+                file: f,
+                status: 'pending' as const,
+                originalPath: filePath || f.name,
+                isReanalysis: true // 🔧 标记为重新分析
             };
         });
         return { files: [...state.files, ...stagedFiles] };
@@ -180,7 +202,9 @@ export const useStagingStore = create<StagingState>((set, get) => ({
                         status: 'pending' as const,
                         proposal: undefined,
                         userEdit: undefined,
-                        error: undefined
+                        error: undefined,
+                        contentHash: undefined, // 🔧 清除 hash 以便重新计算
+                        isReanalysis: true // 🔧 标记为重新分析，跳过重复检测
                     };
                 }
                 return f;

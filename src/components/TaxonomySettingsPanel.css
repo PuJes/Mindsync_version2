@@ -110,6 +110,34 @@
     color: #868e96;
 }
 
+/* 语言切换 */
+.language-toggle {
+    display: flex;
+    gap: 8px;
+}
+
+.lang-btn {
+    flex: 1;
+    padding: 10px 16px;
+    border: 2px solid #e9ecef;
+    border-radius: 8px;
+    background: #fff;
+    cursor: pointer;
+    font-weight: 500;
+    font-size: 14px;
+    transition: all 0.2s;
+}
+
+.lang-btn:hover {
+    border-color: #74c0fc;
+}
+
+.lang-btn.active {
+    border-color: #339af0;
+    background: #e7f5ff;
+    color: #1c7ed6;
+}
+
 /* 深度控制 */
 .depth-control {
     display: flex;

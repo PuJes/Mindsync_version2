@@ -45,7 +45,9 @@ import {
   FolderOpen,
   FolderTree,
   RefreshCw,
-  Folder
+  Folder,
+  FileCheck,
+  MoreVertical
 } from 'lucide-react';
 import { TaxonomySettingsPanel } from './components/TaxonomySettingsPanel';
 
@@ -150,139 +152,11 @@ const sanitizeAnalysisResult = (result: Partial<KnowledgeItem>): Partial<Knowled
   return sanitized;
 };
 
-const readFileAsBase64 = (file: File): Promise<string> => {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const base64 = (reader.result as string).split(',')[1];
-      resolve(base64);
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-};
 
-const readFileAsText = (file: File): Promise<string> => {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = reject;
-    reader.readAsText(file);
-  });
-};
-
-// --- 智能判断是否可分析的后缀白名单 ---
-const ANALYZABLE_EXTENSIONS = ['txt', 'md', 'pdf', 'doc', 'docx', 'py', 'js', 'ts', 'tsx', 'jsx', 'html', 'css', 'json', 'csv', 'ppt', 'pptx', 'xlsx', 'xls', 'c', 'cpp', 'go', 'rs', 'java'];
-
-const isAnalyzable = (fileName: string) => {
-  const ext = fileName.split('.').pop()?.toLowerCase();
-  return ext && ANALYZABLE_EXTENSIONS.includes(ext);
-};
 
 // --- API 调用逻辑 ---
 
-async function analyzeContentWithDeepSeek(
-  file: File,
-  apiKey: string,
-  modelName: string = "deepseek-chat",
-  rawContent?: string,
-  filePath?: string,
-  existingCategories: string[] = []
-): Promise<Partial<KnowledgeItem>> {
-  if (!isAnalyzable(file.name)) {
-    return {
-      category: "无法分析",
-      summary: "由于文件格式不支持或为二进制文件，AI 无法直接读取其详细内容。建议手动归类。",
-      tags: ["二进制", "待处理"],
-      applicability: "文件存档"
-    };
-  }
 
-  const prompt = `你是一个专业的知识整理助手。请分析以下文件的内容，并将其整理为结构化的知识索引信息。
-
-【已有分类参考】: ${existingCategories.length > 0 ? existingCategories.join(', ') : '无'}
-【规则】:
-1. 分类: 优先匹配相似的【已有分类】，若不匹配则创建新分类（如：技术文档/前端）。
-2. 标签: 严格生成 3-5 个，去重，每个标签 2-4 字。
-3. 摘要: 包含一句话概述 + 3个核心要点。
-4. 返回格式: 纯 JSON，不含格式块。
-
-文件名: ${file.name}
-文件内容摘要: ${rawContent ? rawContent.substring(0, 5000) : "无法直接读取内容"}
-
-请返回 JSON:
-{
-  "category": "分类名称",
-  "summary": "详细摘要",
-  "tags": ["标签1", "标签2", "标签3"],
-  "applicability": "适用场景"
-}`;
-
-  try {
-    const response = await fetch("https://api.deepseek.com/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        model: modelName,
-        messages: [{ role: "user", content: prompt }],
-        response_format: modelName === "deepseek-chat" ? { type: "json_object" } : undefined
-      })
-    });
-
-    const data = await response.json();
-    let resultText = data.choices[0].message.content;
-    resultText = resultText.replace(/```json/g, "").replace(/```/g, "").trim();
-    return JSON.parse(resultText);
-  } catch (err) {
-    console.error("DeepSeek Error:", err);
-    throw err;
-  }
-}
-
-async function analyzeContentWithGemini(
-  file: File,
-  apiKey: string,
-  modelName: string = "gemini-2.0-flash-exp",
-  rawContent?: string,
-  filePath?: string,
-  existingCategories: string[] = []
-): Promise<Partial<KnowledgeItem>> {
-  if (!isAnalyzable(file.name)) {
-    return {
-      category: "无法分析",
-      summary: "该文件格式暂不支持深度内容分析或为加密/二进制文件。",
-      tags: ["无法读取"],
-      applicability: "归档"
-    };
-  }
-
-  const client = new GoogleGenAI({ apiKey });
-  const result = await (client as any).models.generateContent({
-    model: modelName,
-    contents: [{
-      role: 'user', parts: [{
-        text: `分析文件并返回 JSON。已有分类：${existingCategories.join(', ') || '无'}。
-要求：分类优先匹配已有；标签精准 3-5 个；摘要包含核心点。
-文件名: ${file.name}
-预览: ${rawContent ? rawContent.substring(0, 5000) : "请根据文件名推测"}`
-      }]
-    }],
-    config: { responseMimeType: "application/json" }
-  });
-
-  let text = "";
-  if (result.response && typeof result.response.text === 'function') {
-    text = await result.response.text();
-  } else if (result.text && typeof result.text === 'string') {
-    text = result.text;
-  }
-
-  return JSON.parse(text);
-}
-;
 
 // --- 子组件：脑图树节点 (Tree Node) ---
 interface TreeNodeProps {
@@ -294,6 +168,10 @@ interface TreeNodeProps {
   dataId?: string; // 用于识别节点 ID
   onDragStart?: (e: React.DragEvent, id: string) => void;
   onDropOnCategory?: (e: React.DragEvent, categoryName: string) => void;
+  // 右键菜单
+  onContextMenu?: (e: React.MouseEvent) => void;
+  // 🎨 样式属性
+  color?: string;
 }
 
 const TreeNode: React.FC<TreeNodeProps> = ({
@@ -303,7 +181,9 @@ const TreeNode: React.FC<TreeNodeProps> = ({
   defaultCollapsed = false,
   dataId,
   onDragStart,
-  onDropOnCategory
+  onDropOnCategory,
+  onContextMenu,
+  color // 🎨 接收颜色参数
 }) => {
   const [isCollapsed, setIsCollapsed] = useState(defaultCollapsed);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -330,63 +210,169 @@ const TreeNode: React.FC<TreeNodeProps> = ({
       e.preventDefault();
       e.stopPropagation();
       setIsDragOver(false);
-      onDropOnCategory(e, dataId); // 这里的 dataId 是 category 的名称
+      onDropOnCategory(e, dataId);
     }
   };
 
   const handleDragStartNode = (e: React.DragEvent) => {
-    if (type === 'file' && onDragStart && dataId) {
+    if ((type === 'file' || type === 'category') && onDragStart && dataId) {
       e.stopPropagation();
       onDragStart(e, dataId);
     }
   };
 
+  // 🎨 获取动态样式
   const getNodeStyles = () => {
-    let baseStyle = "relative flex flex-col justify-center transition-transform duration-300 ";
+    let baseStyle = "relative flex flex-col justify-center transition-all duration-300 ";
 
-    if (type === 'root') return baseStyle + 'bg-slate-900 text-white shadow-lg border-slate-800 px-6 py-3 rounded-full text-base font-bold tracking-wide z-20';
-    if (type === 'category') return baseStyle + `bg-white border-2 ${isDragOver ? 'border-blue-500 ring-4 ring-blue-100 scale-105' : 'border-blue-100'} text-blue-700 shadow-sm px-5 py-2.5 rounded-xl text-sm font-bold min-w-[120px] text-center z-10 hover:border-blue-300 hover:shadow-md transition-all`;
-    if (type === 'file') return baseStyle + 'bg-white border border-slate-200 text-slate-700 shadow-sm px-4 py-3 rounded-xl text-sm font-medium min-w-[200px] max-w-[260px] text-left z-10 hover:border-blue-400 hover:shadow-md hover:-translate-y-0.5 transition-all group cursor-grab active:cursor-grabbing';
-    if (type === 'tag') return baseStyle + 'bg-emerald-50 border border-emerald-100 text-emerald-700 px-3 py-1 rounded-full text-xs font-medium hover:bg-emerald-100 transition-colors cursor-pointer hover:border-emerald-300';
+    // Root: 深色中心
+    if (type === 'root') return baseStyle + 'bg-slate-800 text-white shadow-xl shadow-slate-200 border-slate-700 px-8 py-4 rounded-2xl text-lg font-bold tracking-wide z-30';
+
+    // Category: 胶囊型，白色背景，彩色边框/文字
+    if (type === 'category') {
+      const bgStyle = isDragOver ? 'bg-blue-50 scale-105 ring-4 ring-blue-100' : 'bg-white hover:-translate-y-0.5 hover:shadow-lg';
+
+      return baseStyle + `${bgStyle} border-2 shadow-md px-6 py-3 rounded-full text-base font-bold min-w-[140px] text-center z-20`;
+    }
+
+    // File: 圆角卡片，左侧彩条
+    if (type === 'file') {
+      return baseStyle + `bg-white border border-slate-100 shadow-sm px-4 py-3 rounded-xl text-sm font-medium min-w-[220px] max-w-[280px] text-left z-20 hover:shadow-md hover:-translate-y-0.5 group border-l-[4px]`;
+    }
+
+    // Tag: 极简胶囊
+    if (type === 'tag') {
+      return baseStyle + 'bg-slate-50 border border-slate-200 text-slate-500 px-2.5 py-0.5 rounded-full text-[10px] font-medium hover:bg-slate-100 transition-colors cursor-pointer';
+    }
+
     return baseStyle + 'bg-white border border-slate-200';
   };
 
+  // 🎨 处理内联样式 (为了支持动态颜色)
+  const dynamicStyle = type === 'category' ? { borderColor: color, color: color } :
+    type === 'file' ? { borderLeftColor: color } : {};
+
+  const handleNodeClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (hasChildren) setIsCollapsed(!isCollapsed);
+  };
+
+  const handleNodeContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (onContextMenu) onContextMenu(e);
+  };
+
+  const styles = getNodeStyles();
+  const connectorColor = color || '#cbd5e1'; // slate-300
+
   return (
     <div className="flex items-center">
-      <div
-        className={`${getNodeStyles()} ${hasChildren ? 'cursor-pointer' : ''}`}
-        onClick={() => hasChildren && setIsCollapsed(!isCollapsed)}
-        draggable={type === 'file'}
-        onDragStart={handleDragStartNode}
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onDrop={handleDrop}
-      >
-        <div className="flex items-center gap-2">
-          {label}
-          {hasChildren && type !== 'root' && (
-            <div className={`w-4 h-4 rounded-full bg-slate-100 flex items-center justify-center text-slate-400 transition-transform ${isCollapsed ? '' : 'rotate-90'}`}><ChevronRight size={10} /></div>
-          )}
+      {/* 节点内容 */}
+      <div className="relative z-20" onContextMenu={handleNodeContextMenu}>
+        <div
+          className={`${styles} ${hasChildren ? 'cursor-pointer' : ''}`}
+          style={dynamicStyle}
+          onClick={handleNodeClick}
+          draggable={type === 'file' || type === 'category'}
+          onDragStart={handleDragStartNode}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+        >
+          <div className="flex items-center gap-2">
+            {label}
+            {hasChildren && type !== 'root' && (
+              <div className={`w-4 h-4 rounded-full bg-slate-50 flex items-center justify-center text-slate-400 transition-transform ${isCollapsed ? '' : 'rotate-90'}`}>
+                <ChevronRight size={10} />
+              </div>
+            )}
+          </div>
         </div>
-        {!isCollapsed && hasChildren && <div className="absolute -right-8 top-1/2 w-8 h-px bg-slate-300"></div>}
       </div>
+
+      {/* 子节点连线和容器 */}
       {!isCollapsed && hasChildren && (
-        <div className="flex flex-col ml-8 relative">
-          <div className="flex flex-col gap-3 py-1">
+        <div className="flex items-center">
+          {/* 父节点延伸线 (使用传入颜色) */}
+          <div className="w-8 h-0.5" style={{ backgroundColor: connectorColor }}></div>
+
+          <div className="flex flex-col justify-center relative">
             {childrenNodes.map((child, index) => {
               const isFirst = index === 0;
               const isLast = index === childrenNodes.length - 1;
               const isOnly = childrenNodes.length === 1;
+
               return (
-                <div key={index} className="relative flex items-center">
-                  {!isOnly && <div className={`absolute -left-4 w-px bg-slate-300 ${isFirst ? 'top-1/2 h-1/2' : ''} ${isLast ? 'top-0 h-1/2' : ''} ${!isFirst && !isLast ? 'top-0 h-full' : ''}`}></div>}
-                  <div className={isFirst
-                    ? "absolute -left-4 w-4 top-1/2 h-px bg-slate-300"
-                    : "absolute -left-4 w-4 top-0 h-[calc(50%+1px)] border-l border-b border-slate-300 rounded-bl-xl"
-                  }></div>
-                  {!isFirst && !isLast && <><div className="absolute -left-4 top-0 bottom-0 w-px bg-slate-300"></div><div className="absolute -left-4 top-1/2 w-4 h-px bg-slate-300"></div></>}
-                  {isOnly && <div className="absolute -left-8 top-1/2 w-8 h-px bg-slate-300"></div>}
-                  {child}
+                <div key={index} className="flex items-center relative pl-8">
+                  {!isOnly ? (
+                    <>
+                      {/* 1. 竖线 (Vertical Spine) - CSS 绘制直线部分 */}
+                      {/* 如果不是第一个，或者是中间节点，需要向上的线条 */}
+                      {!isFirst && (
+                        <div
+                          className="absolute left-0 w-0.5 top-0"
+                          style={{
+                            backgroundColor: connectorColor,
+                            height: isLast ? 'calc(50% - 11px)' : '100%'
+                          }}
+                        ></div>
+                      )}
+
+                      {/* 如果不是最后一个，或者是中间节点，需要向下的线条 */}
+                      {!isLast && (
+                        <div
+                          className="absolute left-0 w-0.5"
+                          style={{
+                            backgroundColor: connectorColor,
+                            top: isFirst ? 'calc(50% + 1px)' : '50%',
+                            height: isFirst ? 'calc(50% - 1px)' : '50%'
+                          }}
+                        ></div>
+                      )}
+
+                      {/* 2. 横线 (Horizontal Branch) - 连接圆角到子节点 */}
+                      <div
+                        className="absolute h-0.5"
+                        style={{
+                          backgroundColor: connectorColor,
+                          left: isFirst || isLast ? '11px' : '0px', // 圆角处留空，直角则直接连接
+                          width: isFirst || isLast ? '21px' : '32px',
+                          top: '50%',
+                          marginTop: '-1px'
+                        }}
+                      ></div>
+
+                      {/* 3. 圆角 (Silky SVG Corners) - 仅用于首尾节点，消除锯齿 */}
+                      {isFirst && (
+                        // First Child: Spine comes from bottom, turns right. 
+                        // Path: M 1 12 Q 1 1 12 1
+                        <svg width="12" height="12" className="absolute left-0 overflow-visible" style={{ top: 'calc(50% - 1px)' }}>
+                          <path d="M 1 12 Q 1 1 12 1" fill="none" stroke={connectorColor} strokeWidth="2" strokeLinecap="round" />
+                        </svg>
+                      )}
+
+                      {isLast && (
+                        // Last Child: Spine comes from top, turns right.
+                        // Path: M 1 0 Q 1 11 12 11
+                        <svg width="12" height="12" className="absolute left-0 overflow-visible" style={{ top: 'calc(50% - 11px)' }}>
+                          <path d="M 1 0 Q 1 11 12 11" fill="none" stroke={connectorColor} strokeWidth="2" strokeLinecap="round" />
+                        </svg>
+                      )}
+
+                      {/* 中间节点的 T 型连接点优化 (可选：添加一个小圆点使连接更圆润？暂时保持 clean T) */}
+                      {!isFirst && !isLast && (
+                        <div className="absolute left-0 w-1.5 h-1.5 rounded-full -translate-x-0.5" style={{ backgroundColor: connectorColor, top: 'calc(50% - 3px)' }}></div>
+                      )}
+                    </>
+                  ) : (
+                    // 只有一个子节点：直接横线
+                    <div className="absolute left-0 top-1/2 w-8 h-0.5 -mt-0.5" style={{ backgroundColor: connectorColor }}></div>
+                  )}
+
+                  <div className="py-2">
+                    {child}
+                  </div>
                 </div>
               );
             })}
@@ -751,6 +737,114 @@ const App = () => {
   const [lastMousePos, setLastMousePos] = useState({ x: 0, y: 0 });
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
 
+  // --- 右键菜单 State ---
+  const [contextMenu, setContextMenu] = useState<{
+    visible: boolean;
+    x: number;
+    y: number;
+    item: KnowledgeItem | null;
+  }>({ visible: false, x: 0, y: 0, item: null });
+
+  // 关闭右键菜单
+  useEffect(() => {
+    const handleClick = () => setContextMenu(prev => ({ ...prev, visible: false }));
+    document.addEventListener('click', handleClick);
+    return () => document.removeEventListener('click', handleClick);
+  }, []);
+
+  // 打开右键菜单
+  const handleContextMenu = (e: React.MouseEvent, item: KnowledgeItem) => {
+    e.preventDefault();
+    e.stopPropagation();
+    console.log('🖱️ [App] handleContextMenu called:', {
+      fileName: item.fileName,
+      clientX: e.clientX,
+      clientY: e.clientY
+    });
+    setContextMenu({
+      visible: true,
+      x: e.clientX,
+      y: e.clientY,
+      item
+    });
+  };
+
+  // --- 文件夹右键菜单 State ---
+  const [folderContextMenu, setFolderContextMenu] = useState<{
+    visible: boolean;
+    x: number;
+    y: number;
+    folderPath: string;
+    folderName: string;
+  }>({ visible: false, x: 0, y: 0, folderPath: '', folderName: '' });
+
+  // 关闭文件夹右键菜单
+  useEffect(() => {
+    const handleClick = () => setFolderContextMenu(prev => ({ ...prev, visible: false }));
+    document.addEventListener('click', handleClick);
+    return () => document.removeEventListener('click', handleClick);
+  }, []);
+
+  // 打开文件夹右键菜单
+  const handleFolderContextMenu = (e: React.MouseEvent, folderPath: string, folderName: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    console.log('🖱️ [App] Folder context menu:', { folderPath, folderName });
+    setFolderContextMenu({
+      visible: true,
+      x: e.clientX,
+      y: e.clientY,
+      folderPath,
+      folderName
+    });
+  };
+
+  // 删除文件夹（只能删除空文件夹）
+  const handleDeleteFolder = async (folderPath: string, folderName: string) => {
+    try {
+      // 1. 检查 Electron API 是否可用
+      if (!storage.isElectron || !window.electronAPI) {
+        alert('此功能仅在桌面版可用');
+        return;
+      }
+
+      // 2. 检查文件夹是否为空
+      const checkResult = await window.electronAPI.isDirEmpty(folderPath);
+      if (!checkResult.success) {
+        alert('检查文件夹失败: ' + checkResult.error);
+        return;
+      }
+
+      if (!checkResult.isEmpty) {
+        alert(`无法删除文件夹 "${folderName}"\n\n该文件夹不为空，包含 ${checkResult.fileCount} 个文件或子文件夹。\n请先移除或删除文件夹内的所有内容。`);
+        return;
+      }
+
+      // 3. 确认删除
+      if (!confirm(`确定要删除空文件夹 "${folderName}" 吗？`)) return;
+
+      // 4. 删除物理文件夹
+      const deleteResult = await window.electronAPI.deleteEmptyDir(folderPath);
+      if (!deleteResult.success) {
+        alert('删除文件夹失败: ' + deleteResult.error);
+        return;
+      }
+
+      // 5. 从 items 中移除该分类下的所有记录（如果有的话）
+      const remainingItems = items.filter(item =>
+        item.category !== folderName &&
+        !item.filePath?.startsWith(folderPath)
+      );
+      await storage.saveAllItems(remainingItems);
+      setItems(remainingItems);
+
+      alert(`已成功删除文件夹 "${folderName}"`);
+    } catch (error) {
+      console.error('删除文件夹失败:', error);
+      alert('删除文件夹失败: ' + (error as Error).message);
+    }
+  };
+
   // 初始化：加载数据
   useEffect(() => {
     const initData = async () => {
@@ -863,66 +957,7 @@ const App = () => {
   const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
   // 递归分析文件树
-  const analyzeFileRecursive = async (
-    node: FileNode,
-    results: { file: FileNode; analysis: Partial<KnowledgeItem> }[],
-    existingCategories: string[]
-  ) => {
-    if (node.type === 'file') {
-      try {
-        console.log(`[Batch] Analyzing File: ${node.path}`);
 
-        // 1. 读取内容 (确保 readTextFile 存在)
-        if (!storage.readTextFile) throw new Error("Storage layer does not support reading text files.");
-        const { content, isText } = await storage.readTextFile!(node.path);
-
-        // 2. 调用 AI 分析
-        const currentKey = provider === 'gemini' ? apiKey : deepSeekApiKey;
-        if (!currentKey) throw new Error("API_KEY_MISSING");
-
-        let analysis: Partial<KnowledgeItem>;
-        const mockFile = {
-          name: node.name,
-          type: isText ? 'text/plain' : 'application/octet-stream'
-        } as File;
-
-        // --- 频率节流 (Throttling) ---
-        // 针对 Gemini 免费版，每分钟限制 10 次，建议间隔至少 6 秒
-        if (provider === 'gemini') {
-          await sleep(6500);
-        }
-
-        if (provider === 'deepseek') {
-          analysis = await analyzeContentWithDeepSeek(mockFile, currentKey, deepSeekModel, content, node.path, existingCategories);
-        } else {
-          analysis = await analyzeContentWithGemini(mockFile, currentKey, geminiModel, content, node.path, existingCategories);
-        }
-
-        console.log(`[Batch] Success for ${node.name}:`, analysis.category);
-        results.push({ file: node, analysis });
-      } catch (err: any) {
-        console.error(`[Batch] Failed for ${node.path}:`, err);
-        results.push({
-          file: node,
-          analysis: {
-            category: "未分类",
-            summary: "分析失败",
-            tags: [`错误: ${err.message || "未知错误"}`]
-          }
-        });
-      } finally {
-        // 无论成功失败，都更新进度条
-        setOrganizeState(prev => ({
-          ...prev,
-          progress: { ...prev.progress, current: Math.min(prev.progress.total, prev.progress.current + 1) }
-        }));
-      }
-    } else if (node.children) {
-      for (const child of node.children) {
-        await analyzeFileRecursive(child, results, existingCategories);
-      }
-    }
-  };
 
   // 开始全量智能整理
   const handleStartAutoOrganize = async () => {
@@ -1105,6 +1140,75 @@ const App = () => {
         batchProcessor.processFiles(pendingIds);
       });
     }, 100);
+  };
+
+  // 重新分析单个或多个文件
+  const handleReanalyzeItem = async (item: KnowledgeItem, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    e?.preventDefault();
+
+    if (!confirm(`确定要重新分析 "${item.fileName}" 吗？`)) return;
+
+    // 1. 创建 mock file 对象
+    const mockFile = {
+      name: item.fileName,
+      path: item.filePath || item.id,
+      size: 0,
+      type: '',
+      lastModified: Date.now(),
+      arrayBuffer: async () => new ArrayBuffer(0),
+      text: async () => '',
+      stream: () => new ReadableStream(),
+      slice: () => new Blob()
+    } as unknown as File;
+
+    // 2. 使用 addFilesForReanalysis 添加（跳过重复检测）
+    const { addFilesForReanalysis } = useStagingStore.getState();
+    addFilesForReanalysis([mockFile]);
+
+    // 3. 切换到审阅面板
+    setWorkflowStatus('reviewing');
+
+    // 4. 触发批处理
+    setTimeout(() => {
+      import('./services/batchProcessor').then(({ batchProcessor }) => {
+        const currentStore = useStagingStore.getState();
+        const pendingIds = currentStore.files
+          .filter(f => f.status === 'pending')
+          .map(f => f.id);
+        batchProcessor.processFiles(pendingIds);
+      });
+    }, 100);
+  };
+
+  // 🔧 进入审阅面板（用于头部按钮）
+  const handleEnterReviewPanel = () => {
+    if (items.length === 0) {
+      alert('当前没有文件可以审阅。请先扫描或上传文件。');
+      return;
+    }
+
+    // 🔧 先清空 stagingStore，防止重复添加
+    const { clearAll } = useStagingStore.getState();
+    clearAll();
+
+    // 将现有 items 添加到 stagingStore
+    const mockFiles = items.map(item => ({
+      name: item.fileName,
+      path: item.filePath || item.id,
+      size: 0,
+      type: item.fileType || '',
+      lastModified: Date.now(),
+      arrayBuffer: async () => new ArrayBuffer(0),
+      text: async () => '',
+      stream: () => new ReadableStream(),
+      slice: () => new Blob()
+    } as unknown as File));
+
+    addFiles(mockFiles);
+
+    // 切换到审阅面板，但不触发分析（让用户选择要分析的文件）
+    setWorkflowStatus('reviewing');
   };
 
   // 旧的 executeOrganize 已由 ReviewDashboard 的 executeCommit 替代
@@ -1598,56 +1702,98 @@ const App = () => {
   const handleZoomOut = () => setTransform(prev => ({ ...prev, scale: Math.max(prev.scale - 0.2, 0.5) }));
   const handleResetView = () => setTransform({ x: 0, y: 0, scale: 1 });
 
+  // 🎨 定义现代极简风配色 (彩虹分支)
+  const BRANCH_COLORS = ['#3b82f6', '#f97316', '#10b981', '#8b5cf6', '#ec4899', '#06b6d4'];
+
   // 渲染脑图逻辑
   const renderMindMap = () => {
     // 1. Electron File Tree Mode
     if (fileTree && storage.isElectron) {
-      const renderNode = (node: FileNode) => {
+      // 🎨 更新 renderNode 以支持颜色传递
+      const renderNode = (node: FileNode, inheritedColor?: string) => {
         // Matching metadata
         const item = items.find(i => i.fileName === node.name || i.filePath === node.path);
-        // Or if not found, just show name
+
+        const isRootNode = node.path === rootPath;
 
         if (node.type === 'directory') {
           return (
             <TreeNode
               key={node.path}
-              type={node.path === rootPath ? 'root' : 'category'}
+              type={isRootNode ? 'root' : 'category'}
               dataId={node.path}
+              color={inheritedColor} // 🎨 传递颜色
               onDropOnCategory={handleFileDropOnCategory}
+              onDragStart={handleFileDragStart}
               label={
-                <div className="flex items-center gap-2 group/cat cursor-pointer hover:text-blue-600 transition-colors">
-                  {node.path === rootPath ? <BrainCircuit size={20} /> : <FolderOpen size={16} />}
+                <div
+                  className="flex items-center gap-2 group/cat cursor-pointer hover:text-blue-600 transition-colors"
+                  onContextMenu={(e) => {
+                    if (!isRootNode) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      handleFolderContextMenu(e, node.path, node.name);
+                    }
+                  }}
+                >
+                  {isRootNode ? <BrainCircuit size={20} /> : <FolderOpen size={16} />}
                   <span>{node.name}</span>
                 </div>
               }
-              childrenNodes={node.children ? node.children.map(child => renderNode(child)) : []}
+              childrenNodes={node.children ? node.children.map((child, index) => {
+                // 🎨 根节点的子节点（Category层级）分配颜色，之后继承
+                const childColor = isRootNode ? BRANCH_COLORS[index % BRANCH_COLORS.length] : inheritedColor;
+                return renderNode(child, childColor);
+              }) : []}
               defaultCollapsed={false}
             />
           );
         } else {
           // File Node
+          // 找到对应的 KnowledgeItem 用于右键菜单
+          const matchedItem = items.find(i => i.fileName === node.name || i.filePath === node.path);
+
           return (
             <TreeNode
               key={node.path}
               type="file"
               dataId={node.path}
+              color={inheritedColor} // 🎨 传递颜色
               onDragStart={handleFileDragStart}
               label={
-                <div className="flex flex-col gap-1 w-full relative group/node">
+                <div
+                  className="flex flex-col gap-1 w-full relative group/node"
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    console.log('🖱️ [Electron FileTree] Context menu on:', node.name);
+                    if (matchedItem) {
+                      handleContextMenu(e, matchedItem);
+                    } else {
+                      // 如果没有匹配的 item，创建一个临时的
+                      const tempItem: KnowledgeItem = {
+                        id: node.path,
+                        fileName: node.name,
+                        filePath: node.path,
+                        fileType: node.name.split('.').pop() || '',
+                        category: '',
+                        tags: [],
+                        summary: '',
+                        applicability: '1',
+                        addedAt: new Date().toISOString()
+                      };
+                      handleContextMenu(e, tempItem);
+                    }
+                  }}
+                >
                   <div
-                    className="flex items-start gap-2.5 cursor-pointer hover:bg-blue-50/50 rounded p-0.5 -m-0.5 transition-colors"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      const matchedItem = items.find(i => i.fileName === node.name); // Simple match
-                      if (matchedItem) handleDownload(matchedItem);
-                      else alert('File not found in index metadata'); // Fallback? Or open file?
-                    }}
-                    title="Drag to move / Click to download"
+                    className="flex items-start gap-2.5 cursor-default"
+                    title="右键点击查看更多操作"
                   >
                     <div className="mt-0.5 shrink-0 bg-slate-50 p-1 rounded-md border border-slate-100">
                       {getFileIcon(node.name, "w-4 h-4")}
                     </div>
-                    <span className="truncate font-medium text-slate-700 leading-tight group-hover/node:text-blue-600 transition-colors">{node.name}</span>
+                    <span className="truncate font-medium text-slate-700 leading-tight">{node.name}</span>
                   </div>
                 </div>
               }
@@ -1710,7 +1856,13 @@ const App = () => {
         onTouchStart={handleCanvasTouchStart}
         onTouchMove={handleCanvasTouchMove}
         onTouchEnd={handleCanvasTouchEnd}
-        style={{ touchAction: 'none' }} // 禁用浏览器默认触摸操作
+        onContextMenu={(e) => {
+          // 只阻止画布空白区域的右键，不阻止节点上的右键
+          if (e.target === e.currentTarget) {
+            e.preventDefault();
+          }
+        }}
+        style={{ touchAction: 'none' }}
       >
         {/* 背景点阵 */}
         <div className="absolute inset-0 opacity-10 pointer-events-none"
@@ -1737,68 +1889,77 @@ const App = () => {
           <TreeNode
             label={<span className="flex items-center gap-2"><BrainCircuit size={20} /> 我的知识大脑</span>}
             type="root"
-            childrenNodes={categories.map(cat => (
-              <TreeNode
-                key={cat}
-                type="category"
-                dataId={cat}
-                onDropOnCategory={handleFileDropOnCategory}
-                label={
-                  <div
-                    className="flex items-center gap-2 group/cat cursor-pointer hover:text-blue-600 transition-colors"
-                    onClick={(e) => handleRenameCategory(cat as string, e)}
-                    title="点击批量修改此分类名称"
-                  >
-                    <span>{cat}</span>
-                    <Edit2 size={12} className="opacity-100 md:opacity-0 group-hover/cat:opacity-100 text-slate-400 cursor-pointer hover:text-blue-500 transition-opacity" />
-                  </div>
-                }
-                childrenNodes={filteredItems.filter(i => i.category === cat).map(file => (
-                  <TreeNode
-                    key={file.id}
-                    type="file"
-                    dataId={file.id}
-                    onDragStart={handleFileDragStart}
-                    label={
-                      <div className="flex flex-col gap-1 w-full relative group/node">
+            childrenNodes={categories.map((cat, index) => {
+              // 🎨 分配颜色
+              const branchColor = BRANCH_COLORS[index % BRANCH_COLORS.length];
+
+              return (
+                <TreeNode
+                  key={cat}
+                  type="category"
+                  dataId={cat}
+                  color={branchColor} // 🎨 传递颜色
+                  onDropOnCategory={handleFileDropOnCategory}
+                  label={
+                    <div
+                      className="flex items-center gap-2 group/cat cursor-pointer hover:text-blue-600 transition-colors"
+                      onClick={(e) => handleRenameCategory(cat as string, e)}
+                      title="点击批量修改此分类名称"
+                    >
+                      <span>{cat}</span>
+                      <Edit2 size={12} className="opacity-100 md:opacity-0 group-hover/cat:opacity-100 text-slate-400 cursor-pointer hover:text-blue-500 transition-opacity" />
+                    </div>
+                  }
+                  childrenNodes={filteredItems.filter(i => i.category === cat).map(file => (
+                    <TreeNode
+                      key={file.id}
+                      type="file"
+                      dataId={file.id}
+                      color={branchColor} // 🎨 继承颜色
+                      onDragStart={handleFileDragStart}
+                      label={
                         <div
-                          className="flex items-start gap-2.5 cursor-pointer hover:bg-blue-50/50 rounded p-0.5 -m-0.5 transition-colors"
-                          onClick={(e) => {
-                            e.stopPropagation(); // 阻止冒泡，防止触发节点折叠
-                            handleDownload(file);
+                          className="flex flex-col gap-1 w-full relative group/node"
+                          onContextMenu={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            console.log('🖱️ [Label] Context menu on file:', file.fileName);
+                            handleContextMenu(e, file);
                           }}
-                          title="拖拽可移动分类 / 点击下载"
                         >
-                          <div className="mt-0.5 shrink-0 bg-slate-50 p-1 rounded-md border border-slate-100">
-                            {getFileIcon(file.fileType, "w-4 h-4")}
+                          <div
+                            className="flex items-start gap-2.5 cursor-default"
+                            title="右键点击查看更多操作"
+                          >
+                            <div className="mt-0.5 shrink-0 bg-slate-50 p-1 rounded-md border border-slate-100">
+                              {getFileIcon(file.fileType, "w-4 h-4")}
+                            </div>
+                            <span className="truncate font-medium text-slate-700 leading-tight" title={file.fileName}>{file.fileName}</span>
                           </div>
-                          <span className="truncate font-medium text-slate-700 leading-tight group-hover/node:text-blue-600 transition-colors" title={file.fileName}>{file.fileName}</span>
+                          {/* 简要描述 */}
+                          {file.summary && (
+                            <div className="text-xs text-slate-400 truncate pl-7" title={file.summary}>
+                              {file.summary.slice(0, 40)}{file.summary.length > 40 ? '...' : ''}
+                            </div>
+                          )}
                         </div>
-                        {/* 脑图模式下的删除按钮 (Hover 显示) */}
-                        <button
-                          onClick={(e) => handleDeleteItem(file.id, e)}
-                          className="absolute -right-8 top-1/2 -translate-y-1/2 p-1.5 bg-white border border-slate-200 text-slate-400 hover:text-red-500 hover:border-red-200 rounded-full shadow-sm opacity-100 md:opacity-0 group-hover/node:opacity-100 transition-all scale-90 hover:scale-100 z-50"
-                          title="删除此节点"
-                        >
-                          <Trash2 size={12} />
-                        </button>
-                      </div>
-                    }
-                    childrenNodes={Array.from(new Set(file.tags.filter(Boolean))).map((tag, idx) => (
-                      <TreeNode
-                        key={`tag-${file.id}-${tag}-${idx}`}
-                        label={
-                          <div title="点击修改或删除标签" onClick={(e) => handleEditTag(file.id, tag as string, e)}>
-                            #{tag}
-                          </div>
-                        }
-                        type="tag"
-                      />
-                    ))}
-                  />
-                ))}
-              />
-            ))}
+                      }
+                      childrenNodes={Array.from(new Set(file.tags.filter(Boolean))).map((tag, idx) => (
+                        <TreeNode
+                          key={`tag-${file.id}-${tag}-${idx}`}
+                          label={
+                            <div title="点击修改或删除标签" onClick={(e) => handleEditTag(file.id, tag as string, e)}>
+                              #{tag}
+                            </div>
+                          }
+                          type="tag"
+                        />
+                      ))}
+                    />
+                  ))}
+                />
+              )
+            })}
           />
         </div>
       </div>
@@ -2014,6 +2175,15 @@ const App = () => {
               <RefreshCw className="w-full h-full" />
             </button>
 
+            {/* 审阅面板入口 */}
+            <button
+              onClick={handleEnterReviewPanel}
+              className="w-9 h-9 rounded-full border bg-blue-50 border-blue-200 text-blue-600 hover:bg-blue-100 p-1.5 transition-all"
+              title="进入审阅面板（选择文件重新分析）"
+            >
+              <FileCheck className="w-full h-full" />
+            </button>
+
             <button
               onClick={() => setShowSettings(true)}
               className={`w-9 h-9 rounded-full border p-1.5 transition-all ${(!apiKey && provider === 'gemini') || (!deepSeekApiKey && provider === 'deepseek')
@@ -2177,7 +2347,11 @@ const App = () => {
           {!isAnalyzing && viewMode === 'grid' && items.length > 0 && (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
               {filteredItems.map(item => (
-                <div key={item.id} className="relative bg-white rounded-xl border border-slate-200 p-5 hover:shadow-lg hover:border-blue-200 hover:-translate-y-1 transition-all flex flex-col h-full group duration-300">
+                <div
+                  key={item.id}
+                  className="relative bg-white rounded-xl border border-slate-200 p-5 hover:shadow-lg hover:border-blue-200 hover:-translate-y-1 transition-all flex flex-col h-full group duration-300"
+                  onContextMenu={(e) => handleContextMenu(e, item)}
+                >
                   {/* 删除按钮 */}
                   <button
                     onClick={(e) => handleDeleteItem(item.id, e)}
@@ -2265,7 +2439,11 @@ const App = () => {
                   </div>
                   <div className="divide-y divide-slate-100">
                     {filteredItems.map(item => (
-                      <div key={item.id} className="grid grid-cols-12 gap-4 px-6 py-4 items-center hover:bg-slate-50 transition-colors group relative">
+                      <div
+                        key={item.id}
+                        className="grid grid-cols-12 gap-4 px-6 py-4 items-center hover:bg-slate-50 transition-colors group relative"
+                        onContextMenu={(e) => handleContextMenu(e, item)}
+                      >
                         <div
                           className="col-span-5 pr-2 flex items-center gap-3 cursor-pointer"
                           onClick={() => handleDownload(item)}
@@ -2394,6 +2572,73 @@ const App = () => {
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] overflow-hidden">
             <TaxonomySettingsPanel onClose={() => setShowTaxonomySettings(false)} />
           </div>
+        </div>
+      )}
+
+      {/* 右键上下文菜单 */}
+      {contextMenu.visible && contextMenu.item && (
+        <div
+          className="fixed bg-white rounded-lg shadow-xl border border-slate-200 py-2 z-[200] min-w-[180px] animate-in fade-in zoom-in-95 duration-100"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="px-3 py-1.5 text-xs font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-100 mb-1">
+            {contextMenu.item.fileName}
+          </div>
+          <button
+            className="w-full px-4 py-2.5 text-left text-sm text-slate-700 hover:bg-blue-50 hover:text-blue-600 flex items-center gap-3 transition-colors"
+            onClick={() => {
+              if (contextMenu.item) handleReanalyzeItem(contextMenu.item);
+              setContextMenu(prev => ({ ...prev, visible: false }));
+            }}
+          >
+            <BrainCircuit size={16} />
+            重新分析
+          </button>
+          <button
+            className="w-full px-4 py-2.5 text-left text-sm text-slate-700 hover:bg-slate-50 flex items-center gap-3 transition-colors"
+            onClick={() => {
+              if (contextMenu.item) handleDownload(contextMenu.item);
+              setContextMenu(prev => ({ ...prev, visible: false }));
+            }}
+          >
+            <Download size={16} />
+            打开文件
+          </button>
+          <div className="border-t border-slate-100 my-1"></div>
+          <button
+            className="w-full px-4 py-2.5 text-left text-sm text-red-500 hover:bg-red-50 flex items-center gap-3 transition-colors"
+            onClick={() => {
+              if (contextMenu.item) handleDeleteItem(contextMenu.item.id);
+              setContextMenu(prev => ({ ...prev, visible: false }));
+            }}
+          >
+            <Trash2 size={16} />
+            删除
+          </button>
+        </div>
+      )}
+
+      {/* 文件夹右键上下文菜单 */}
+      {folderContextMenu.visible && (
+        <div
+          className="fixed bg-white rounded-lg shadow-xl border border-slate-200 py-2 z-[200] min-w-[180px] animate-in fade-in zoom-in-95 duration-100"
+          style={{ left: folderContextMenu.x, top: folderContextMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="px-3 py-1.5 text-xs font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-100 mb-1">
+            📁 {folderContextMenu.folderName}
+          </div>
+          <button
+            className="w-full px-4 py-2.5 text-left text-sm text-red-500 hover:bg-red-50 flex items-center gap-3 transition-colors"
+            onClick={() => {
+              handleDeleteFolder(folderContextMenu.folderPath, folderContextMenu.folderName);
+              setFolderContextMenu(prev => ({ ...prev, visible: false }));
+            }}
+          >
+            <Trash2 size={16} />
+            删除文件夹
+          </button>
         </div>
       )}
     </div>

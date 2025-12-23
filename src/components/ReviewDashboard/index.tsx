@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useStagingStore, StagedFile } from '../../store/stagingStore';
 import { fileOpsService } from '../../services/fileOps';
 import { batchProcessor } from '../../services/batchProcessor';
+import { taxonomyService } from '../../services/taxonomyService';
 import { ArrowRight, FileText, Check, AlertTriangle, X, Loader2, Undo2 } from 'lucide-react';
 import './ReviewDashboard.css';
 
@@ -169,12 +170,24 @@ const MetadataEditor = () => {
         setPathInput(value);
         updateUserEdit(selectedFile.id, { targetPath: value });
         setShowSuggestions(true);
+
+        // 记录用户纠正 (如果与 AI 建议不同)
+        const aiSuggested = selectedFile.proposal?.targetPath;
+        if (aiSuggested && aiSuggested !== value && value.length > 0) {
+            taxonomyService.recordCorrection(aiSuggested, value, selectedFile.file.name);
+        }
     };
 
     const handleSelectSuggestion = (suggestion: string) => {
         setPathInput(suggestion);
         updateUserEdit(selectedFile.id, { targetPath: suggestion });
         setShowSuggestions(false);
+
+        // 记录用户纠正
+        const aiSuggested = selectedFile.proposal?.targetPath;
+        if (aiSuggested && aiSuggested !== suggestion) {
+            taxonomyService.recordCorrection(aiSuggested, suggestion, selectedFile.file.name);
+        }
     };
 
     const handleKeyDown = (e: React.KeyboardEvent) => {

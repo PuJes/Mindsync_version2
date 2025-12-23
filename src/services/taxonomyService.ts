@@ -1,4 +1,4 @@
-import { CategoryNode, TaxonomyConfig, FileMetadataV3 } from '../types/metadata.v3';
+import { CategoryNode, TaxonomyConfig, FileMetadataV3, CorrectionRecord } from '../types/metadata.v3';
 import { storage } from '../utils/fileStorage';
 
 // 默认配置
@@ -6,8 +6,13 @@ const DEFAULT_CONFIG: TaxonomyConfig = {
     mode: 'strict',
     maxDepth: 3,
     maxChildren: 10,
-    ignorePatterns: ['.DS_Store', 'node_modules', '*.tmp', '.git', '.mindsync_temp']
+    ignorePatterns: ['.DS_Store', 'node_modules', '*.tmp', '.git', '.mindsync_temp'],
+    targetCategoryCount: undefined, // 用户未设置时为 undefined
+    categoryVocabulary: [] // 默认为空
 };
+
+// 用户纠正历史存储键
+const CORRECTION_HISTORY_KEY = 'taxonomy_correction_history';
 
 // 默认分类树
 const DEFAULT_TAXONOMY_ROOT: CategoryNode[] = [
@@ -262,6 +267,119 @@ export class TaxonomyService {
     public removeIgnorePattern(pattern: string): void {
         this.config.ignorePatterns = this.config.ignorePatterns.filter(p => p !== pattern);
         this.saveConfigToStorage();
+    }
+
+    // ==========================================
+    // 用户纠正学习 (Correction Learning)
+    // ==========================================
+
+    /**
+     * 加载纠正历史
+     */
+    public loadCorrectionHistory(): CorrectionRecord[] {
+        try {
+            const saved = localStorage.getItem(CORRECTION_HISTORY_KEY);
+            return saved ? JSON.parse(saved) : [];
+        } catch {
+            return [];
+        }
+    }
+
+    /**
+     * 保存纠正历史
+     */
+    private saveCorrectionHistory(history: CorrectionRecord[]): void {
+        try {
+            // 只保留最近 100 条记录
+            const trimmed = history.slice(-100);
+            localStorage.setItem(CORRECTION_HISTORY_KEY, JSON.stringify(trimmed));
+        } catch (e) {
+            console.warn('Failed to save correction history', e);
+        }
+    }
+
+    /**
+     * 记录用户纠正
+     */
+    public recordCorrection(aiSuggested: string, userChosen: string, fileName: string): void {
+        if (aiSuggested === userChosen) return; // 无需记录相同的选择
+
+        const history = this.loadCorrectionHistory();
+        history.push({
+            aiSuggested,
+            userChosen,
+            fileName,
+            timestamp: Date.now()
+        });
+
+        this.saveCorrectionHistory(history);
+        console.log('📝 [TaxonomyService] Recorded correction:', { aiSuggested, userChosen, fileName });
+    }
+
+    /**
+     * 根据文件名查询是否有历史纠正可应用
+     */
+    public findApplicableCorrection(fileName: string): CorrectionRecord | null {
+        const history = this.loadCorrectionHistory();
+
+        // 1. 精确匹配文件名
+        const exactMatch = history.find(r => r.fileName === fileName);
+        if (exactMatch) return exactMatch;
+
+        // 2. 模糊匹配：相同扩展名 + 相似前缀
+        const ext = fileName.split('.').pop()?.toLowerCase();
+        const prefix = fileName.split(/[\d_\-]/)[0]?.toLowerCase(); // 提取前缀
+
+        if (ext && prefix && prefix.length > 2) {
+            const fuzzyMatch = history.find(r => {
+                const rExt = r.fileName.split('.').pop()?.toLowerCase();
+                const rPrefix = r.fileName.split(/[\d_\-]/)[0]?.toLowerCase();
+                return rExt === ext && rPrefix === prefix;
+            });
+            if (fuzzyMatch) {
+                console.log('🔄 [TaxonomyService] Found fuzzy correction match:', { fileName, matched: fuzzyMatch.fileName });
+                return fuzzyMatch;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * 添加词汇表项
+     */
+    public addVocabularyItem(category: string): void {
+        if (!this.config.categoryVocabulary) {
+            this.config.categoryVocabulary = [];
+        }
+        const normalized = category.replace(/^\/+/, '').replace(/\/+$/, '');
+        if (normalized && !this.config.categoryVocabulary.includes(normalized)) {
+            this.config.categoryVocabulary.push(normalized);
+            this.saveConfigToStorage();
+        }
+    }
+
+    /**
+     * 移除词汇表项
+     */
+    public removeVocabularyItem(category: string): void {
+        if (!this.config.categoryVocabulary) return;
+        this.config.categoryVocabulary = this.config.categoryVocabulary.filter(c => c !== category);
+        this.saveConfigToStorage();
+    }
+
+    /**
+     * 检查分类是否在词汇表中
+     */
+    public isInVocabulary(category: string): boolean {
+        if (!this.config.categoryVocabulary || this.config.categoryVocabulary.length === 0) {
+            return true; // 词汇表为空时不限制
+        }
+        const normalized = category.replace(/^\/+/, '').replace(/\/+$/, '');
+        return this.config.categoryVocabulary.some(v =>
+            normalized.toLowerCase().startsWith(v.toLowerCase()) ||
+            v.toLowerCase().startsWith(normalized.toLowerCase())
+        );
     }
 }
 

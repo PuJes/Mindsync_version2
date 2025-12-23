@@ -36,6 +36,11 @@ function createWindow() {
         console.log('Loading local file:', indexPath);
         mainWindow.loadFile(indexPath);
     }
+
+    // 🔧 禁用默认右键菜单，让 React 处理
+    mainWindow.webContents.on('context-menu', (e) => {
+        e.preventDefault();
+    });
 }
 
 // --- App Lifecycle ---
@@ -167,6 +172,45 @@ ipcMain.handle('fs:movePath', async (_event, oldPath: string, newPath: string) =
         return { success: true };
     } catch (error: any) {
         console.error('Move Path Error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+// 10. Check if Directory is Empty
+ipcMain.handle('fs:isDirEmpty', async (_event, dirPath: string) => {
+    try {
+        const files = await fs.promises.readdir(dirPath);
+        // 过滤掉隐藏文件和系统文件
+        const visibleFiles = files.filter(f => !f.startsWith('.') && f !== 'knowledge_index.json');
+        return { success: true, isEmpty: visibleFiles.length === 0, fileCount: visibleFiles.length };
+    } catch (error: any) {
+        console.error('Check Dir Empty Error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+// 11. Delete Empty Directory
+ipcMain.handle('fs:deleteEmptyDir', async (_event, dirPath: string) => {
+    try {
+        // 先检查是否为空
+        const files = await fs.promises.readdir(dirPath);
+        const visibleFiles = files.filter(f => !f.startsWith('.') && f !== 'knowledge_index.json');
+
+        if (visibleFiles.length > 0) {
+            return { success: false, error: `文件夹不为空，包含 ${visibleFiles.length} 个文件/子文件夹` };
+        }
+
+        // 删除隐藏文件（如 .DS_Store）
+        for (const file of files) {
+            const filePath = path.join(dirPath, file);
+            await fs.promises.unlink(filePath);
+        }
+
+        // 删除空目录
+        await fs.promises.rmdir(dirPath);
+        return { success: true };
+    } catch (error: any) {
+        console.error('Delete Empty Dir Error:', error);
         return { success: false, error: error.message };
     }
 });

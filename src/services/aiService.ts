@@ -1,4 +1,5 @@
 import { GoogleGenAI } from '@google/genai';
+import { ManifestItem, AIProtocolResponse, TaxonomyConfig } from '../types/metadata.v3';
 
 // 分析结果接口
 export interface AIAnalysisResult {
@@ -197,5 +198,226 @@ export async function analyzeFile(
         return analyzeWithDeepSeek(file, config.apiKey, config.model, rawContent, existingCategories);
     } else {
         return analyzeWithGemini(file, config.apiKey, config.model, rawContent, existingCategories);
+    }
+}
+
+/**
+ * 3.3. Phase 1: 批量元数据预审 (Manifest Analysis)
+ */
+export async function analyzeManifest(
+    items: ManifestItem[],
+    config: AIServiceConfig,
+    existingCategories: string[] = [],
+    taxonomyConfig?: TaxonomyConfig
+): Promise<AIProtocolResponse> {
+    const maxDepth = taxonomyConfig?.maxDepth || 3;
+    const maxChildren = taxonomyConfig?.maxChildren || 10;
+    const targetCount = taxonomyConfig?.targetCategoryCount;
+    const vocabulary = taxonomyConfig?.categoryVocabulary || [];
+    const language = taxonomyConfig?.categoryLanguage || 'auto';
+
+    const languageInstruction = language === 'zh'
+        ? '\n【语言要求】: 所有分类名称必须使用**中文**命名（如：工作/财务、生活/旅行）'
+        : language === 'en'
+            ? '\n【语言要求】: All category names MUST be in **English** (e.g., Work/Finance, Life/Travel)'
+            : ''; // auto 不添加限制
+
+    const prompt = `你是一个智能文件归档助手。你需要对一批文件进行快速预审。
+这是 Phase 1 阶段：仅根据文件名和大小判断是否可以直接分类。
+
+【已有分类参考】: ${existingCategories.length > 0 ? existingCategories.join(', ') : '无 (可创建新分类)'}
+${vocabulary.length > 0 ? `\n【分类词汇表】(优先使用): ${vocabulary.join(', ')}` : ''}
+${targetCount ? `\n【目标分类数量】: 请尽量将所有文件聚合到约 ${targetCount} 个分类中，避免创建过多细碎分类` : ''}${languageInstruction}
+
+【分类规则限制】:
+1. **层级深度限制**: 分类路径最多 ${maxDepth} 级 (例如: /Work/Finance/2024 是3级)
+2. **同级数量限制**: 每个父目录下最多 ${maxChildren} 个子分类
+3. 优先复用【已有分类】和【分类词汇表】，避免创建过多新分类
+
+【指令说明】:
+1. **Direct**: 如果根据文件名非常有把握（置信度>0.8），直接给出分类建议。
+   - **summary 要求**: 约100字的详细摘要，包含：文件用途、核心内容概述、适用场景或价值。
+2. **Need_Info**: 如果文件名含糊（如 "image.png", "data.json", "未命名.docx"），请请求查看内容。
+   - text_preview: 文本/代码文件
+   - image_vision: 图片文件
+   - full_text: 短文本文件
+
+${taxonomyConfig?.forceDeepAnalysis ? `\n【特殊强制指令】:
+用户已开启【强制深度分析模式】(Force Deep Analysis)。
+请忽略所有 "Direct" 判断，对 **每一个文件** 都必须返回 "Need_Info" 指令。
+你需要请求查看文件内容 (text_preview / image_vision / full_text) 才能进行准确分类和生成详细摘要。
+绝对不要返回 "Direct"，除非文件无法读取 (如过大的二进制文件)。` : ''}
+
+【输入文件清单】:
+${JSON.stringify(items.map(i => ({ id: i.id, name: i.name, size: `${Math.ceil(i.size / 1024)}KB` })), null, 2)}
+
+【输出格式】:
+请返回一个 JSON 对象，key 为文件ID，value 为处理指令。
+示例:
+{
+  "items": {
+    "file_1": {
+      "instruction": "Direct",
+      "category": "/Work/Finance",
+      "summary": "这是2024年1月的财务报表文件，记录了公司当月的收入、支出和利润情况。报表涵盖了各部门的预算执行情况和年度财务目标对比分析，适用于财务审计和管理层决策参考。",
+      "tags": ["报表", "财务", "2024"],
+      "reasoning": "文件名明确指出了时间和类型",
+      "confidence": 0.95
+    },
+    "file_2": {
+      "instruction": "Need_Info",
+      "reason": "文件名 '截图.png' 无法判断内容",
+      "requestType": "image_vision"
+    }
+  }
+}`;
+
+    const systemMessage = "你是一个无需废话的 JSON API，只返回合法的 JSON 数据。";
+
+    // 统一调用逻辑（复用 DeepSeek/Gemini）
+    if (config.provider === 'deepseek') {
+        const response = await fetch('https://api.deepseek.com/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${config.apiKey}`
+            },
+            body: JSON.stringify({
+                model: config.model,
+                messages: [
+                    { role: 'system', content: systemMessage },
+                    { role: 'user', content: prompt }
+                ],
+                response_format: { type: 'json_object' }
+            })
+        });
+
+        const data = await response.json();
+        const content = data.choices[0].message.content.replace(/```json/g, '').replace(/```/g, '').trim();
+        return JSON.parse(content);
+    } else {
+        // Gemini
+        const client = new GoogleGenAI({ apiKey: config.apiKey });
+        const result = await (client as any).models.generateContent({
+            model: config.model,
+            contents: [{
+                role: 'user',
+                parts: [{ text: systemMessage + "\n" + prompt }]
+            }],
+            config: { responseMimeType: 'application/json' }
+        });
+
+        let text = '';
+        if (result.response && typeof result.response.text === 'function') {
+            text = await result.response.text();
+        } else if (result.text) {
+            text = typeof result.text === 'function' ? await result.text() : result.text;
+        }
+
+        if (!text) {
+            console.error('❌ [analyzeManifest] Gemini returned empty response:', result);
+            throw new Error('Gemini 返回了空响应，请检查 API Key 和模型配置。');
+        }
+        return JSON.parse(text);
+    }
+}
+
+/**
+ * 3.3 Phase 2: 补充信息分析 (Analyze with Supplements)
+ */
+export async function analyzeWithSupplements(
+    file: File,
+    supplementContent: string, // 文本片段 或 Base64
+    requestType: 'text_preview' | 'image_vision' | 'full_text' | 'pdf_document', // Added pdf_document
+    config: AIServiceConfig,
+    existingCategories: string[] = [],
+    taxonomyConfig?: TaxonomyConfig
+): Promise<AIAnalysisResult> {
+    const isImage = requestType === 'image_vision';
+    const isPdf = requestType === 'pdf_document' || file.name.toLowerCase().endsWith('.pdf');
+    const maxDepth = taxonomyConfig?.maxDepth || 3;
+    const maxChildren = taxonomyConfig?.maxChildren || 10;
+
+    // DeepSeek 限制检查
+    if (config.provider === 'deepseek') {
+        if (isImage) {
+            throw new Error("DeepSeek 模型暂不支持视觉分析 (Vision)，请切换至 Gemini Pro Vision 或类似模型。");
+        }
+        if (isPdf) {
+            throw new Error("DeepSeek 模型暂不支持 PDF 原生分析，请切换至 Gemini Pro 1.5/2.0 等支持长上下文的模型。");
+        }
+    }
+
+    const promptText = `这是 Phase 2 阶段：根据补充的内容进行最终分类。
+文件名: ${file.name}
+${isImage ? '【图片内容已提供】' : isPdf ? '【PDF内容已提供】' : `【补充文本内容】:\n${supplementContent.substring(0, 8000)}`}
+
+【已有分类参考】: ${existingCategories.join(', ') || '无'}
+
+【分类规则限制】:
+1. 分类路径最多 ${maxDepth} 级
+2. 每个父目录下最多 ${maxChildren} 个子分类
+3. 优先复用【已有分类】
+
+请返回标准 JSON 分析结果:
+{
+  "category": "...",
+  "summary": "...",
+  "tags": [...],
+  "reasoning": "...",
+  "confidence": ...
+}`;
+
+    if (config.provider === 'gemini') {
+        const client = new GoogleGenAI({ apiKey: config.apiKey });
+        const parts: any[] = [{ text: promptText }];
+
+        if (isImage || isPdf) {
+            // supplementContent 应该是 base64 字符串
+            parts.push({
+                inlineData: {
+                    mimeType: isPdf ? 'application/pdf' : (file.type || 'image/jpeg'),
+                    data: supplementContent
+                }
+            });
+        }
+
+        const result = await (client as any).models.generateContent({
+            model: config.model,
+            contents: [{ role: 'user', parts }],
+            config: { responseMimeType: 'application/json' }
+        });
+
+        let text = '';
+        if (result.response && typeof result.response.text === 'function') {
+            text = await result.response.text();
+        } else if (result.text) {
+            text = typeof result.text === 'function' ? await result.text() : result.text;
+        }
+
+        if (!text) {
+            console.error('❌ [analyzeWithSupplements] Gemini returned empty response:', result);
+            throw new Error('Gemini Vision 返回了空响应，请检查 API Key 和模型配置。');
+        }
+        // 兼容处理：Gemini 有时返回数组
+        const parsed = JSON.parse(text);
+        return Array.isArray(parsed) ? parsed[0] : parsed;
+    } else {
+        // DeepSeek (Text only)
+        const response = await fetch('https://api.deepseek.com/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${config.apiKey}`
+            },
+            body: JSON.stringify({
+                model: config.model,
+                messages: [{ role: 'user', content: promptText }],
+                response_format: { type: 'json_object' }
+            })
+        });
+
+        const data = await response.json();
+        return JSON.parse(data.choices[0].message.content);
     }
 }
