@@ -1,5 +1,4 @@
-<div align="center">
-<img width="1200" height="475" alt="Mindsync Banner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+
 <h1>MindSync v2.0 - AI 本地知识库智能整理中心</h1>
 <p><b>人机协作型智能文件管理利器 | AI 分类建议 + 人工最终决策</b></p>
 </div>
